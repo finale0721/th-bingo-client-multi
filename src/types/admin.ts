@@ -15,6 +15,10 @@ export interface AdminGameRecordSummary {
   round_winner: number | null;
   round_winner_name: string | null;
   players: string[];
+  team_a?: string[];
+  team_b?: string[];
+  team_a_captain?: string | null;
+  team_b_captain?: string | null;
   game_type: number;
   game_type_name: string;
   score: number[];

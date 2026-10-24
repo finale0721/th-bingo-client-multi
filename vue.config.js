@@ -16,8 +16,9 @@ module.exports = {
   // webpack-dev-server 相关配置
   devServer: {
     host: "0.0.0.0",
-    port: "8888",
-    open: true,
+    // 默认 9962；本地多人联调时用 DEV_PORT=9963/9964/... 并行起多个实例
+    port: process.env.DEV_PORT || "9962",
+    open: !process.env.DEV_PORT,
     // proxy: {
     //   [process.env.VUE_APP_BASE_API]: {
     //     target: `http://`,

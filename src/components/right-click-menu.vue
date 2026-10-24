@@ -11,7 +11,7 @@
             :key="'a' + index"
             @mouseup="onMenuItemClick($event, item)"
             @contextmenu.prevent
-            :class="{ 'menu-item': true, playerA: true }"
+            :class="{ 'menu-item': true, playerA: true, placeholder: item.placeholder }"
           >
             {{ item.label }}
           </div>
@@ -22,7 +22,7 @@
             :key="'b' + index"
             @mouseup="onMenuItemClick($event, item)"
             @contextmenu.prevent
-            :class="{ 'menu-item': true, playerB: true }"
+            :class="{ 'menu-item': true, playerB: true, placeholder: item.placeholder }"
           >
             {{ item.label }}
           </div>
@@ -70,6 +70,7 @@ const generalItems = computed(() => props.menuData.filter((item) => !item.tag));
 const emits = defineEmits(["click"]);
 
 const onMenuItemClick = (e: any, item: any) => {
+  if (item.placeholder) return; // 空占位行不可点击
   emits("click", { event: e, target: targetElement.value, item });
   showMenu.value = false;
   e.stopPropagation();
@@ -166,6 +167,7 @@ watch(
   z-index: 999;
   border-radius: 4px;
   min-width: 180px;
+  width: max-content; // 按菜单文本自适应宽度
   border: 1px solid #ccc;
   display: flex;
   flex-direction: column;
@@ -177,8 +179,7 @@ watch(
 
 .menu-col-a,
 .menu-col-b {
-  flex: 1;
-  min-width: 0;
+  flex: 0 0 auto; // 列宽由文本决定
 }
 
 .menu-col-a {
@@ -195,6 +196,7 @@ watch(
   line-height: 20px;
   padding: 6px 10px;
   cursor: pointer;
+  white-space: nowrap; // 单个菜单项不换行
 
   &:not(:first-child) {
     border-top: 1px solid #ccc;
@@ -210,6 +212,16 @@ watch(
 
   &.playerB {
     color: var(--B-color);
+  }
+
+  // 空占位行：保留行高与分隔线，但不响应悬停/点击
+  &.placeholder {
+    min-height: 20px;
+    cursor: default;
+
+    &:hover {
+      background-color: transparent;
+    }
   }
 }
 </style>

@@ -61,31 +61,93 @@ export interface Spell {
   max_cap_rate: number, //最高收率
 }
 
+/** 标准赛单元格视图（服务端已按查看者裁剪） */
+export interface CellView {
+  index: number;
+  selected_by_a: string[];
+  selected_by_b: string[];
+  capture_count_a: number | null;
+  capture_count_b: number | null;
+  captured_by_a: boolean;
+  captured_by_b: boolean;
+  fully_captured_by: number | null;
+  my_selected: boolean;
+  /** 0-完全隐藏，1-只显示作品，2-作品+关卡，3-只显示星级，4-完整显示 */
+  content_reveal: number;
+}
+
+export interface RoomTeamMemberInfo {
+  name: string;
+  captain: boolean;
+  online: boolean;
+  /** 加入房间的稳定顺序；切队不改变该值 */
+  order: number;
+}
+
+export interface RoomTeamInfo {
+  key: "A" | "B";
+  members: RoomTeamMemberInfo[];
+  score: number;
+  change_card_count: number;
+}
+
+export interface CellSnapshot {
+  selected_by_a: string[];
+  selected_by_b: string[];
+  capture_count_a: number;
+  capture_count_b: number;
+  captured_by_a: boolean;
+  captured_by_b: boolean;
+  fully_captured_by: number | null;
+}
+
+export interface GameTeamMemberSnapshot {
+  name: string;
+  captain: boolean;
+  actual_cd_time_ms: number;
+}
+
+export interface GameTeamSnapshot {
+  key: string;
+  members: GameTeamMemberSnapshot[];
+  captain: string | null;
+}
+
+export interface StandardData {
+  capture_standard: number;
+  dual_board: boolean;
+  copy_board: boolean;
+  board_size: number;
+  extra_lines: number[][];
+  teams: GameTeamSnapshot[];
+  cells: CellSnapshot[];
+  cells2: CellSnapshot[] | null;
+}
+
 export interface GameData {
   spells: Spell[];
-  spell_status: number[]; // 25张符卡的收取状态
+  spells2: Spell[] | null;
+  cells: CellView[];
+  cells2: CellView[] | null;
+  my_selected_index: number;
+  my_selected_board: number;
+  my_team: number | null;
+  is_captain: boolean;
+  capture_standard: number;
+  change_card_count: number[];
+  my_change_pending: boolean;
+  my_change_origin_index: number;
+  my_change_origin_board: number;
   left_time: number; // 倒计时剩余时间，单位：毫秒
   status: number; // 0-未开始，1-赛前倒计时中，2-开始，3-暂停中，4-结束
   left_cd_time: number; // 选卡cd剩余时间，单位：毫秒
-  push_ban_pick: { [index: string]: any } | null; // 赛前BP的相关数据，同push_ban_pick协议的参数，如果不是赛前BP则为null
-  bp_data: {
-    // BP赛相关数据，如果不是BP赛则为null
-    whose_turn: number; // 轮到谁了，0-左边，1-右边
-    ban_pick: number; // 0-选，1-ban，2-轮到收卡了
-    spell_failed_count_a: number[]; // 左边玩家25张符卡的失败次数
-    spell_failed_count_b: number[]; // 右边玩家25张符卡的失败次数
-  };
-  link_data: { [index: string]: any } | null; // BP赛相关数据，同push_link_data协议的参数，如果不是BP赛则为null
-  normal_data: {
-    which_board_a: number;
-    which_board_b: number;
-    is_portal_a: number[];
-    is_portal_b: number[];
-    get_on_which_board: number[];
-    extra_lines: number[][];
-  } | null
-  spells2: Spell[] | null;
+  extra_lines: number[][];
   room_config?: RoomConfig;
+  // 旧协议兼容字段（回放/休眠模式）
+  spell_status?: number[];
+  bp_data?: { whose_turn: number; ban_pick: number; spell_failed_count_a: number[]; spell_failed_count_b: number[]; };
+  link_data?: { [index: string]: any } | null;
+  normal_data?: { which_board_a?: number; which_board_b?: number; is_portal_a?: number[]; is_portal_b?: number[]; get_on_which_board?: number[]; extra_lines?: number[][]; } | null;
 }
 
 export interface LinkData {
@@ -138,17 +200,19 @@ export interface RoomConfig {
   blind_setting: 1;
   spell_version: 2;
   dual_board: 0;
-  portal_count: 5;
+  /** 旧字段：传送门已移除 */
+  portal_count?: 5;
   blind_reveal_level: 2;
   diff_level: 3;
-  use_ai: false;
-  ai_strategy_level: 3;
-  ai_style: 0;
-  ai_base_power: 5;
-  ai_experience: 5;
-  ai_temperature: 0.0;
+  /** 旧字段：AI 已移除，仅保留以兼容历史回放数据 */
+  use_ai?: false;
+  ai_strategy_level?: 3;
+  ai_style?: 0;
+  ai_base_power?: 5;
+  ai_experience?: 5;
+  ai_temperature?: 0.0;
   game_weight: Record<string, number>;
-  ai_preference: Record<string, number>;
+  ai_preference?: Record<string, number>;
   custom_level_count: number[];
   board_size: number;
   extra_line_count: number;
@@ -165,6 +229,9 @@ export interface RoomConfig {
   custom_card_pool_enabled?: boolean;
   custom_card_pool_compressed?: string;
   pick_guarantee_count?: number;
+  capture_standard?: number;
+  copy_board?: boolean;
+  practice?: boolean;
 }
 
 export interface EditorPreset {

@@ -1,10 +1,10 @@
 <template>
   <div class="room">
-    <div class="room-title" v-if="roomData.names">
-      <div class="player-A">{{ roomData.names[0] }}</div>
+    <div class="room-title">
+      <div class="player-A" :class="{ placeholder: !captainA }">{{ captainA || "A队" }}</div>
       <div class="scoreboard">
         <div class="A-scoreboard">
-          <template v-if="roomData.names[0]">
+          <template v-if="roomData.teams?.[0]?.members?.length">
             <div
               :class="{ 'score-circle': true, 'scored-A': roomData.score[0] >= needWin - index }"
               v-for="(item, index) in needWinArr"
@@ -14,7 +14,7 @@
         </div>
         <div class="vs-text">VS</div>
         <div class="B-scoreboard">
-          <template v-if="roomData.names[1]">
+          <template v-if="!roomData.practice && roomData.teams?.[1]?.members?.length">
             <div
               :class="{ 'score-circle': true, 'scored-B': roomData.score[1] >= index + 1 }"
               v-for="(item, index) in needWinArr"
@@ -23,7 +23,7 @@
           ></template>
         </div>
       </div>
-      <div class="player-B">{{ roomData.names[1] }}</div>
+      <div class="player-B" :class="{ placeholder: !captainB }">{{ captainB || "B队" }}</div>
     </div>
     <div class="room-content">
       <el-row class="">
@@ -37,7 +37,7 @@
             <right-click-menu
               style="width: 100%; height: 100%; display: flex; justify-content: center; align-items: center"
               :menuData="contextMenuData"
-              :disabled="!editorStore.isEditorMode && (!menu || menu.length === 0 || !inGame)"
+              :disabled="!editorStore.isEditorMode && (!menu || menu.length === 0 || !inGame || !canUseMenu)"
               @click="onMenuClick"
             >
               <div class="bingo-inner-align">
@@ -53,25 +53,22 @@
                         :name="item.name"
                         :desc="item.desc"
                         :level="isBingoStandard ? item.star : item.star + 100"
-                        :failCountA="dataSource.bpGameData?.spell_failed_count_a[index] || 0"
-                        :failCountB="dataSource.bpGameData?.spell_failed_count_b[index] || 0"
+                        :failCountA="dataSource.bpGameData?.spell_failed_count_a?.[index] || 0"
+                        :failCountB="dataSource.bpGameData?.spell_failed_count_b?.[index] || 0"
                         @click="isEditorMode ? emits('editor-cell-click', index) : selectSpellCard(index)"
                         :selected="selectedSpellIndex === index"
-                        :status="displayStatus(index)"
+                        :status="isBingoStandard ? undefined : displayStatus(index)"
+                        :cell="isBingoStandard ? cellAt(index) : null"
+                        :otherCell="isBingoStandard ? otherCellAt(index) : null"
+                        :isDualBoard="isBingoStandard && isDualBoard"
+                        :viewerIsA="isPlayerA"
+                        :viewerIsB="isPlayerB"
                         :link-status-a="linkStatusA(index)"
                         :link-status-b="linkStatusB(index)"
                         :link-skipped-a="linkSkippedA(index)"
                         :link-skipped-b="linkSkippedB(index)"
                         :index="index"
                         :link-marker="linkMarker(index)"
-                        :isPortalA="
-                          roomStore.roomConfig.dual_board > 0 && dataSource.normalGameData?.is_portal_a[index] > 0
-                        "
-                        :isPortalB="
-                          roomStore.roomConfig.dual_board > 0 && dataSource.normalGameData?.is_portal_b[index] > 0
-                        "
-                        :isACurrentBoard="gameStore.currentBoard == 0"
-                        :isBCurrentBoard="gameStore.currentBoard == 1"
                         :spellIndex="index"
                       ></spell-card-cell>
                     </div>
@@ -251,6 +248,22 @@ const inGame = computed(() => roomStore.inGame);
 const needWin = computed(() => roomStore.roomConfig.need_win);
 const isBingoStandard = computed(() => roomData.value.type === BingoType.STANDARD);
 const isBingoLink = computed(() => roomData.value.type === BingoType.LINK);
+const isDualBoard = computed(() => roomStore.roomConfig.dual_board > 0);
+const captainA = computed(() => roomStore.teamMembers(0).find((m) => m.captain)?.name || "");
+const captainB = computed(() => roomStore.teamMembers(1).find((m) => m.captain)?.name || "");
+/** 导播房只有导播可以右键操作；无导播房任一成员都可以 */
+const canUseMenu = computed(() => !gameStore.isReplayMode && (roomStore.isHost || (!roomData.value.host && roomStore.isPlayer)));
+
+const currentCells = computed(() => {
+  if (!isBingoStandard.value) return [];
+  return gameStore.currentBoard === 1 ? gameStore.cells2 : gameStore.cells;
+});
+const otherCells = computed(() => {
+  if (!isBingoStandard.value || !isDualBoard.value) return [];
+  return gameStore.currentBoard === 1 ? gameStore.cells : gameStore.cells2;
+});
+const cellAt = (index: number) => currentCells.value[index] || null;
+const otherCellAt = (index: number) => otherCells.value[index] || null;
 
 const boardSizeFromSpells = computed(() => {
   const length = dataSource.value.spells?.length || 0;
@@ -308,7 +321,9 @@ const displayedSpells = computed(() => {
   return source;
 });
 const extraLinesForDisplay = computed(() => {
-  const lines = dataSource.value.normalGameData?.extra_lines;
+  const lines = isBingoStandard.value && !editorStore.isEditorMode
+    ? gameStore.extraLines
+    : dataSource.value.normalGameData?.extra_lines;
   if (!lines || lines.length === 0) return [];
   const bs = boardSize.value;
   return lines.map((line: number[]) => {
@@ -357,7 +372,7 @@ const selectSpellCard = (index: number) => {
     return; // 结束函数，不执行下面的游戏逻辑
   }
 
-  if (isWatcher.value) {
+  if (isWatcher.value || gameStore.isReplayMode) {
     return;
   }
   if (isBingoLink.value) {
@@ -375,6 +390,18 @@ const selectSpellCard = (index: number) => {
     });
     return;
   }
+  if (isBingoStandard.value) {
+    const cell = cellAt(index);
+    if (!cell || !roomStore.isPlayer) return;
+    if (cell.fully_captured_by !== null) return;
+    // 已有确认选卡时，单击任何格子都不改变选卡（换卡/导播操作除外）
+    if (gameStore.mySelectedIndex !== -1) {
+      return;
+    }
+    selectedSpellIndex.value = selectedSpellIndex.value === index ? -1 : index;
+    return;
+  }
+  // 休眠模式（BP/Link）兼容逻辑
   if (selectedSpellIndex.value === index) {
     selectedSpellIndex.value = -1;
   } else {
@@ -439,15 +466,17 @@ const onMenuClick = ({ event, target, item }: any) => {
     } else if (item.value === "clear") {
       editorStore.clearSpell(index);
     }
+  } else if (isBingoStandard.value) {
+    gameStore.updateCellState(parseInt(index), item.op, {
+      name: item.name,
+      team: item.team,
+      board: gameStore.currentBoard,
+    });
   } else {
     if (item.isReset != null && item.isReset == false) {
       gameStore.finishSpell(parseInt(index), false, gameStore.spellStatus[index] === 5 ? 0 : 1);
-    } else {
-      if (item.value == 0x100) {
-        gameStore.refreshSpell(parseInt(index));
-      } else {
-        gameStore.updateSpellStatus(parseInt(index), item.value);
-      }
+    } else if (item.value == 0x100) {
+      gameStore.refreshSpell(parseInt(index));
     }
   }
 };
@@ -523,9 +552,17 @@ watch(
   }
 );
 
+// 只有实际收取者会收到 push_my_capture
+watch(
+  () => gameStore.myCaptureFlag,
+  (val) => {
+    if (val) infoCaptureCard();
+  }
+);
+
 const gameStarted = computed(() => gameStore.gameStatus === GameStatus.STARTED);
 watch(gameStarted, (started) => {
-  if (started) {
+  if (started && !gameStore.isReplayMode) {
     startGameAudioRef.value?.stop();
     startGameAudioRef.value?.play();
   }
@@ -541,7 +578,7 @@ watch(gameCountDown, (started) => {
 
 const gamePaused = computed(() => gameStore.gameStatus === GameStatus.PAUSED);
 watch(gamePaused, (paused) => {
-  if (paused) {
+  if (paused && !gameStore.isReplayMode) {
     pauseAudioRef.value?.stop();
     pauseAudioRef.value?.play();
   }
@@ -618,12 +655,25 @@ defineExpose({ showAlert, hideAlert, warnGamePoint, infoCaptureCard, infoFailCar
     text-align: right;
     width: 35%;
     height: 32px;
+    line-height: 32px; // 固定行盒，避免中文回退字体把文字压低
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .player-B {
     text-align: left;
     width: 35%;
     height: 32px;
+    line-height: 32px; // 固定行盒，避免中文回退字体把文字压低
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .player-A.placeholder,
+  .player-B.placeholder {
+    color: #999;
   }
 
   .scoreboard {

@@ -281,7 +281,8 @@
             <el-descriptions-item label="保存时间">{{ formatDate(selectedRecord.saved_at) }}</el-descriptions-item>
             <el-descriptions-item label="归档月份">{{ selectedRecord.storage_month || "-" }}</el-descriptions-item>
             <el-descriptions-item label="开始时间">{{ formatDate(selectedRecord.started_at) }}</el-descriptions-item>
-            <el-descriptions-item label="玩家">{{ formatPlayers(selectedRecord.players) }}</el-descriptions-item>
+            <el-descriptions-item label="A队">{{ formatTeam(selectedRecord.team_a, selectedRecord.team_a_captain) }}</el-descriptions-item>
+            <el-descriptions-item label="B队">{{ formatTeam(selectedRecord.team_b, selectedRecord.team_b_captain) }}</el-descriptions-item>
             <el-descriptions-item label="模式">{{ selectedRecord.game_type_name }}</el-descriptions-item>
             <el-descriptions-item label="保存原因">{{ saveReasonLabel(selectedRecord.save_reason) }}</el-descriptions-item>
             <el-descriptions-item label="局内比分">{{ formatScore(selectedRecord.score) }}</el-descriptions-item>
@@ -318,7 +319,7 @@
                     @click="jumpToAction(action.timestamp)"
                   >
                     <strong>{{ formatDuration(action.timestamp) }}</strong>
-                    <small>{{ action.playerName || "-" }} / {{ actionTypeLabel(action.actionType) }} / {{ action.spellName || "-" }}</small>
+                    <small>{{ action.playerName || "-" }} / {{ actionTypeLabel(action.op || action.actionType) }} / {{ action.spellName || "-" }}</small>
                   </button>
                 </div>
               </section>
@@ -367,6 +368,7 @@ import {
   ElTable,
   ElTableColumn,
   ElTag,
+  vLoading,
 } from "element-plus";
 import AdminReplayPlayer from "@/components/AdminReplayPlayer.vue";
 import { useAdminStore } from "@/store/AdminStore";
@@ -454,6 +456,10 @@ const dailyBars = computed(() => {
 
 const formatDate = (timestamp?: number | null) => (timestamp ? new Date(timestamp).toLocaleString() : "-");
 const formatPlayers = (players: string[]) => players.filter(Boolean).join(" vs ") || "-";
+const formatTeam = (members?: string[], captain?: string | null) => {
+  if (!members || members.length === 0) return "-";
+  return members.map((name) => (name === captain ? `${name}(队长)` : name)).join(", ");
+};
 const formatScore = (score?: number[] | null) => `${score?.[0] ?? 0} - ${score?.[1] ?? 0}`;
 const formatDecimal = (value?: number | null) => (value ? value.toFixed(1) : "0.0");
 const formatRate = (value?: number | null) => `${(((value || 0) * 100).toFixed(1))}%`;
@@ -464,6 +470,18 @@ const saveReasonLabel = (reason: string) => {
 };
 const actionTypeLabel = (actionType: string) => {
   if (actionType === "select") return "选择符卡";
+  if (actionType === "cancel") return "取消选卡";
+  if (actionType === "capture_partial") return "收取一次";
+  if (actionType === "capture_complete") return "完成收取";
+  if (actionType === "grab_victim") return "被抢卡";
+  if (actionType === "grab_public") return "抢卡";
+  if (actionType === "director_select") return "导播选卡";
+  if (actionType === "director_cancel") return "导播取消选卡";
+  if (actionType === "director_capture") return "导播收取一次";
+  if (actionType === "director_set") return "导播设为收取";
+  if (actionType === "director_clear") return "导播置空";
+  if (actionType === "change") return "使用换卡";
+  if (actionType === "refund") return "换卡返还";
   if (actionType === "finish") return "收取符卡";
   if (actionType === "contest_win") return "抢卡成功";
   if (actionType === "pause") return "暂停比赛";

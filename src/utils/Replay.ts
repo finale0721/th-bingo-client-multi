@@ -1,7 +1,7 @@
 import { useGameStore } from "@/store/GameStore";
 import { computed, nextTick, reactive, ref, watch } from "vue";
 import { useRoomStore } from "@/store/RoomStore";
-import { BingoType, GameData, GameStatus, LinkData, OneSpell, RoomConfig, Spell, SpellStatus } from "@/types";
+import { BingoType, CellSnapshot, CellView, GameData, GameStatus, LinkData, OneSpell, RoomConfig, Spell, SpellStatus, StandardData } from "@/types";
 import ws from "@/utils/webSocket/WebSocketBingo";
 import { WebSocketActionType, WebSocketPushActionType } from "@/utils/webSocket/types";
 import Config from "@/config";
@@ -16,6 +16,15 @@ export interface PlayerAction {
   linkData?: LinkData | null;
   spell?: Spell; // 附加一个spell对象，方便处理
   scoreNow?: number[];
+  team?: number | null;
+  op?: string | null;
+  board?: number | null;
+  name?: string | null;
+  affected_name?: string | null;
+  victims?: string[];
+  change_card_count?: number[] | null;
+  cell_after?: CellSnapshot | null;
+  cell_after_other?: CellSnapshot | null;
 }
 
 export interface GameLogData {
@@ -37,6 +46,7 @@ export interface GameLogData {
   initStatus: number[];
   isCustomGame: boolean | null;
   linkData?: LinkData | null;
+  standard_data?: StandardData | null;
 }
 
 export interface ReplayPayload {
@@ -91,6 +101,11 @@ class Replay {
   };
   private originalPlayerNames: string[] = Array(2).fill("");
   private originalRoomDataType: BingoType = BingoType.STANDARD;
+  private originalTeams: any[] = [];
+  private originalHost = "";
+  private originalPractice = false;
+  private originalRosterLocked = false;
+  private originalScore: number[] = [0, 0];
 
   public isPlaying = false;
 
@@ -122,6 +137,11 @@ class Replay {
     }
     this.originalPlayerNames = [...this.roomStore.roomData.names];
     this.originalRoomDataType = this.roomStore.roomData.type;
+    this.originalTeams = JSON.parse(JSON.stringify(this.roomStore.roomData.teams || []));
+    this.originalHost = this.roomStore.roomData.host;
+    this.originalPractice = this.roomStore.roomData.practice;
+    this.originalRosterLocked = this.roomStore.roomData.roster_locked;
+    this.originalScore = [...(this.roomStore.roomData.score || [0, 0])];
 
     //  设置回放用的房间配置和玩家名称
     for (const i in this.gameLogData.roomConfig) {
@@ -129,6 +149,27 @@ class Replay {
     }
     this.roomStore.roomData.names = [...this.gameLogData.players];
     this.roomStore.roomData.type = this.gameLogData.roomConfig.type;
+    const standardTeams = this.gameLogData.standard_data?.teams;
+    if (standardTeams && standardTeams.length >= 2) {
+      this.roomStore.roomData.teams = standardTeams.map((team: any, index: number) => ({
+        key: team.key || (index === 0 ? "A" : "B"),
+        members: (team.members || []).map((m: any) => ({
+          name: m.name,
+          captain: !!m.captain,
+          online: true,
+        })),
+        score: 0,
+        change_card_count: 0,
+      }));
+      this.roomStore.roomData.names = [
+        standardTeams[0]?.captain || standardTeams[0]?.members?.[0]?.name || this.gameLogData.players[0] || "",
+        standardTeams[1]?.captain || standardTeams[1]?.members?.[0]?.name || this.gameLogData.players[1] || "",
+      ];
+    }
+    this.roomStore.roomData.host = "";
+    this.roomStore.roomData.practice = false;
+    this.roomStore.roomData.roster_locked = false;
+    this.roomStore.roomData.score = [0, 0];
 
     //  基于回放数据初始化游戏
     this.initGameData();
@@ -234,12 +275,33 @@ class Replay {
       this.gameStore.normalGameData.extra_lines = [];
     }
 
-    // 设置初始spellStatus
-    this.gameStore.spellStatus = [...this.gameLogData.initStatus];
+    const standard = this.gameLogData.standard_data;
+    if (standard) {
+      this.gameStore.cells = (standard.cells || []).map((cell, index) => {
+        const view = this.snapshotToView(cell);
+        view.index = index;
+        return view;
+      });
+      this.gameStore.cells2 = (standard.cells2 || []).map((cell, index) => {
+        const view = this.snapshotToView(cell);
+        view.index = index;
+        return view;
+      });
+      this.gameStore.extraLines = standard.extra_lines || [];
+      this.gameStore.captureStandard = standard.capture_standard || 1;
+      this.gameStore.mySelectedIndex = -1;
+      this.gameStore.mySelectedBoard = 0;
+      this.gameStore.myTeam = null;
+      this.gameStore.changeCardCount = [0, 0];
+      this.gameStore.changePending = false;
+    }
+    // 旧回放兼容
+    this.gameStore.spellStatus = [...(this.gameLogData.initStatus || [])];
     this.applyReplayLinkData(this.gameLogData.linkData);
 
     // 标记游戏开始
     this.roomStore.roomData.started = true;
+    this.gameStore.gameStatus = GameStatus.STARTED;
     this.gameStore.leftTime = this.roomStore.roomConfig.game_time * 1000 * 60 * 9;
   }
 
@@ -296,9 +358,62 @@ class Replay {
     this.roomStore.roomData.score = [Math.floor(next.score_a || 0), Math.floor(next.score_b || 0)];
   }
 
+  private snapshotToView(cell: CellSnapshot): CellView {
+    return {
+      index: 0,
+      selected_by_a: [...(cell?.selected_by_a || [])],
+      selected_by_b: [...(cell?.selected_by_b || [])],
+      capture_count_a: cell?.capture_count_a ?? null,
+      capture_count_b: cell?.capture_count_b ?? null,
+      captured_by_a: !!cell?.captured_by_a,
+      captured_by_b: !!cell?.captured_by_b,
+      fully_captured_by: cell?.fully_captured_by ?? null,
+      my_selected: false,
+      content_reveal: 4,
+    };
+  }
+
+  private applyCellAfter(action: PlayerAction): void {
+    if (!action.cell_after) return;
+    const board = action.board ?? 0;
+    const index = action.spellIndex;
+    if (index < 0) return;
+    const next = this.snapshotToView(action.cell_after);
+    next.index = index;
+    // 回放展示完整信息
+    next.content_reveal = 4;
+    const otherBoard = 1 - board;
+    const list = board === 1 ? this.gameStore.cells2 : this.gameStore.cells;
+    const copy = [...list];
+    copy[index] = next;
+    if (board === 1) this.gameStore.cells2 = copy;
+    else this.gameStore.cells = copy;
+    if (action.cell_after_other) {
+      const otherView = this.snapshotToView(action.cell_after_other);
+      otherView.index = index;
+      otherView.content_reveal = 4;
+      const otherList = otherBoard === 1 ? this.gameStore.cells2 : this.gameStore.cells;
+      const otherCopy = [...otherList];
+      otherCopy[index] = otherView;
+      if (otherBoard === 1) this.gameStore.cells2 = otherCopy;
+      else this.gameStore.cells = otherCopy;
+    }
+    if (action.change_card_count) {
+      this.gameStore.changeCardCount = [...action.change_card_count];
+    }
+  }
+
   private executeAction(action: PlayerAction): void {
     if (this.gameLogData?.roomConfig.type === BingoType.LINK && action.linkData) {
       this.applyReplayLinkData(action.linkData);
+      return;
+    }
+    // 标准赛：状态完全由 cellAfter 快照决定
+    if (this.gameLogData?.standard_data) {
+      const op = action.op || action.actionType;
+      if (op === "pause") this.handlePause();
+      else if (op === "resume") this.handleResume();
+      else this.applyCellAfter(action);
       return;
     }
 
@@ -374,6 +489,11 @@ class Replay {
     }
     this.roomStore.roomData.names = [...this.originalPlayerNames];
     this.roomStore.roomData.type = this.originalRoomDataType;
+    this.roomStore.roomData.teams = this.originalTeams;
+    this.roomStore.roomData.host = this.originalHost;
+    this.roomStore.roomData.practice = this.originalPractice;
+    this.roomStore.roomData.roster_locked = this.originalRosterLocked;
+    this.roomStore.roomData.score = [...this.originalScore];
 
     // 重置游戏状态
     this.gameStore.resetGameData();
@@ -461,14 +581,6 @@ class Replay {
     }
     this.jumpToTime(this.gameLogData.actions[this.actionIndex].timestamp);
   }
-
-  public getDifficultyFix = (spell: Spell): number => {
-    const difficulty = spell.difficulty;
-    const max = spell.max_cap_rate;
-    if(difficulty < 7) return max;
-    if(difficulty < 17) return max * (1.0 - (difficulty - 7) * 0.03);
-    return max * 0.7;
-  };
 
   public uint8ArrayToBase64 = (array: Uint8Array): string => {
     // 将每个字节转换为字符
@@ -740,10 +852,8 @@ class Replay {
 
   public buildReplayCode = (logObject: GameLogData): string => {
     const normalizedLog = this.normalizeGameLog(logObject);
-    const replayLog = {
-      ...normalizedLog,
-      actions: normalizedLog.actions.map(({ scoreNow, ...action }) => action),
-    };
+    // 保留 scoreNow / cell_after 等快照字段，回放与分析都依赖它们
+    const replayLog = { ...normalizedLog };
     const dataToEncode: ReplayPayload = {
       version: REPLAY_DATA_VERSION,
       data: replayLog,
@@ -765,8 +875,11 @@ class Replay {
       .toString()
       .padStart(2, "0")}`;
     const timeStr = `${date.getHours().toString().padStart(2, "0")}${date.getMinutes().toString().padStart(2, "0")}`;
-    const leftPlayer = this.sanitizeFileName(logData.players[0] || "playerA");
-    const rightPlayer = this.sanitizeFileName(logData.players[1] || "playerB");
+    const teams = logData.standard_data?.teams;
+    const leftName = teams?.[0]?.captain || teams?.[0]?.members?.[0]?.name || logData.players[0] || "playerA";
+    const rightName = teams?.[1]?.captain || teams?.[1]?.members?.[0]?.name || logData.players[1] || "playerB";
+    const leftPlayer = this.sanitizeFileName(leftName);
+    const rightPlayer = this.sanitizeFileName(rightName);
     return `${prefix}_${dateStr}_${timeStr}_${leftPlayer}_vs_${rightPlayer}.txt`;
   };
 
@@ -851,20 +964,12 @@ class Replay {
       data ? `${(data.score_a || 0).toFixed(2)} - ${(data.score_b || 0).toFixed(2)}` : "0.00 - 0.00";
     const cellLabel = (idx: number) => `(${Math.floor(idx / bs) + 1}, ${(idx % bs) + 1})`;
     const routeLabel = (route: number[] | undefined) => (route || []).map(cellLabel).join(" -> ") || "-";
-    const usedMs = (data: LinkData | null | undefined, playerIndex: number) => {
-      if (!data) return 0;
-      const start = playerIndex === 0 ? data.start_ms_a : data.start_ms_b;
-      const end = playerIndex === 0 ? data.end_ms_a : data.end_ms_b;
-      return start > 0 && end > start ? end - start : 0;
-    };
     const collectStats = players.map((player) => {
       const stats = {
         selectActionByIndex: new Map<number, PlayerAction>(),
         completedTasks: [] as string[],
         skippedTasks: [] as string[],
         totalTime: 0,
-        totalFastest: 0,
-        totalFastestWeighted: 0,
         starCounts: [0, 0, 0, 0, 0],
       };
       actions.forEach((action) => {
@@ -887,9 +992,6 @@ class Replay {
         stats.selectActionByIndex.delete(action.spellIndex);
         const duration = selectAction ? Math.max(0, action.timestamp - selectAction.timestamp) : 0;
         stats.totalTime += duration;
-        stats.totalFastest += spell.fastest || 0;
-        stats.totalFastestWeighted +=
-          (spell.fastest || 0) + 3.5 + (1 / this.getDifficultyFix(spell) - 1) * ((spell.miss_time || 0) + 1.5);
         stats.starCounts[spell.star - 1] = (stats.starCounts[spell.star - 1] || 0) + 1;
         stats.completedTasks.push(`- "${spell.name}": ${(duration / 1000).toFixed(2)}s`);
       });
@@ -975,7 +1077,6 @@ class Replay {
         if (!spell) return;
         levelSum += spell.star || 0;
       });
-      const elapsed = usedMs(finalLinkData, playerIndex);
       const scoreValue = playerIndex === 0 ? finalLinkData?.score_a || 0 : finalLinkData?.score_b || 0;
       const stats = collectStats[playerIndex];
       output.push(`[玩家: ${player}]`);
@@ -984,19 +1085,6 @@ class Replay {
       output.push(`完成进度: ${completedRoute.length}/${route.length}, 收取 ${capturedRoute.length} 张, 跳过 ${skipped.size} 张`);
       output.push(`等级分布: [${stats.starCounts.join(",")}], 总等级: ${levelSum}`);
       output.push(`收卡时间: ${formatTimestamp(stats.totalTime)} (${(stats.totalTime / 1000).toFixed(2)}s)`);
-      output.push(`路线耗时: ${formatTimestamp(elapsed)} (${(elapsed / 1000).toFixed(2)}s), 理论最速合计: ${stats.totalFastest.toFixed(2)}s`);
-      if (Config.spellListWithTimer.includes(roomConfig.spell_version) && !logData.isCustomGame) {
-        const captureEfficiency =
-          stats.totalTime > 0 ? (((stats.totalFastest * 1000) / stats.totalTime) * 100).toFixed(2) : "N/A";
-        const routeEfficiency =
-          elapsed > 0 ? (((stats.totalFastestWeighted * 1000) / elapsed) * 100).toFixed(2) : "N/A";
-        output.push(
-          `纯收卡效率 ${captureEfficiency}% (${stats.totalFastest.toFixed(2)}s / ${(stats.totalTime / 1000).toFixed(2)}s)`
-        );
-        output.push(
-          `总时间效率 ${routeEfficiency}% (${stats.totalFastestWeighted.toFixed(2)}s / ${(elapsed / 1000).toFixed(2)}s)`
-        );
-      }
       output.push(`Link分数: ${scoreValue.toFixed(2)}`);
       output.push("");
     });
@@ -1044,8 +1132,379 @@ class Replay {
     URL.revokeObjectURL(url);
   };
 
+  /**
+   * 多人标准赛导出日志：口径见设计文档 10.4.1。
+   * 状态一律由 action.cell_after 快照驱动，不再用 actionType 差分推断。
+   */
+  public formatStandardReadableLog = (logData: GameLogData, replayDataB64: string): string => {
+    const { roomConfig, players, score, spells, spells2, actions, gameStartTimestamp } = logData;
+    const standard = logData.standard_data!;
+    const bs = roomConfig.board_size || 5;
+    const area = bs * bs;
+    const isDual = !!standard.dual_board;
+    const countdownMs = roomConfig.countdown * 1000;
+    const teamOf: Record<string, number> = {};
+    (standard.teams || []).forEach((team, index) => {
+      (team.members || []).forEach((m) => {
+        teamOf[m.name] = index;
+      });
+    });
+    const allPlayers = (standard.teams || []).flatMap((t) => (t.members || []).map((m) => m.name));
+    if (!allPlayers.length) allPlayers.push(...players);
+
+    const output: string[] = [];
+    const formatTimestamp = (ms: number) => {
+      const totalSeconds = Math.floor(ms / 1000);
+      const minutes = Math.floor(totalSeconds / 60)
+        .toString()
+        .padStart(2, "0");
+      const seconds = (totalSeconds % 60).toString().padStart(2, "0");
+      return `${minutes}:${seconds}`;
+    };
+    const getVisualLength = (str: string): number => {
+      const wideCharRegex = /[一-龥＀-￯]/g;
+      return str.replace(wideCharRegex, "  ").length;
+    };
+    const padStart = (str: string, targetLength: number, padString = " "): string => {
+      const paddingLength = targetLength - getVisualLength(str);
+      return paddingLength <= 0 ? str : padString.repeat(paddingLength) + str;
+    };
+    const padEnd = (str: string, targetLength: number, padString = " "): string => {
+      const paddingLength = targetLength - getVisualLength(str);
+      return paddingLength <= 0 ? str : str + padString.repeat(paddingLength);
+    };
+    const cellLabel = (index: number) => `(${Math.floor(index / bs) + 1}, ${(index % bs) + 1})`;
+    const spellAt = (board: number, index: number) =>
+      (board === 1 ? spells2 : spells)?.[index] || spells?.[index];
+    const starOf = (board: number, index: number) => {
+      if (!isDual) return spells?.[index]?.star || 0;
+      return Math.max(spells?.[index]?.star || 0, spells2?.[index]?.star || 0);
+    };
+
+    // ---------- 暂停区间 ----------
+    const pauseIntervals: [number, number][] = [];
+    let pauseStart = -1;
+    for (const action of actions) {
+      const op = action.op || action.actionType;
+      if (op === "pause") pauseStart = action.timestamp;
+      else if (op === "resume" && pauseStart >= 0) {
+        pauseIntervals.push([pauseStart, action.timestamp]);
+        pauseStart = -1;
+      }
+    }
+    const pauseBefore = (ts: number) =>
+      pauseIntervals.reduce((sum, [start, end]) => sum + Math.max(0, Math.min(ts, end) - start), 0);
+    const gameTs = (ts: number) => ts - pauseBefore(ts);
+    const duration = (startTs: number, endTs: number) =>
+      Math.max(0, gameTs(endTs) - Math.max(gameTs(startTs), countdownMs));
+
+    type Cycle = { board: number; index: number; startTs: number };
+    type PlayerStats = {
+      name: string;
+      active: Cycle | null;
+      captureActions: number;
+      untrackedCaptures: number;
+      stolenCount: number;
+      teammateStolenCount: number;
+      changeCount: number;
+      directorAttributed: number;
+      tasks: string[];
+      stars: number[];
+    };
+    const stats: Record<string, PlayerStats> = {};
+    allPlayers.forEach((name) => {
+      stats[name] = {
+        name,
+        active: null,
+        captureActions: 0,
+        untrackedCaptures: 0,
+        stolenCount: 0,
+        teammateStolenCount: 0,
+        changeCount: 0,
+        directorAttributed: 0,
+        tasks: [],
+        stars: [0, 0, 0, 0, 0],
+      };
+    });
+
+    const addCaptureStats = (st: PlayerStats, board: number, index: number, d: number) => {
+      const spell = spellAt(board, index);
+      st.captureActions++;
+      const star = spell?.star || 1;
+      if (star >= 1 && star <= 5) st.stars[star - 1]++;
+      st.tasks.push(`- "${spell?.name || "?"}": ${(d / 1000).toFixed(2)}s`);
+    };
+    const closeActive = (st: PlayerStats, kind: "abandoned" | "stolen", endTs: number, note?: string) => {
+      if (!st.active) return;
+      if (kind === "stolen") {
+        const d = duration(st.active.startTs, endTs);
+        st.stolenCount++;
+        if (note === "teammate") st.teammateStolenCount++;
+        const spell = spellAt(st.active.board, st.active.index);
+        st.tasks.push(`- "${spell?.name || "?"}" (被抢${note === "teammate" ? "，队友完成" : ""}): ${(d / 1000).toFixed(2)}s`);
+      }
+      st.active = null;
+    };
+
+    // ---------- 队伍统计 ----------
+    const fullyState: (number | null)[] = new Array(area).fill(null);
+    const captureBoardOf = (a: PlayerAction) => a.board ?? 0;
+
+    for (const action of actions) {
+      const op = action.op || action.actionType;
+      const index = action.spellIndex;
+      const board = captureBoardOf(action);
+      if (action.cell_after && index >= 0) {
+        fullyState[index] = action.cell_after.fully_captured_by ?? null;
+      }
+
+      if (op === "select" || op === "director_select") {
+        const name = op === "director_select" ? action.name ?? action.affected_name : action.playerName;
+        const st = name ? stats[name] : null;
+        if (st) {
+          closeActive(st, "abandoned", action.timestamp);
+          st.active = { board, index, startTs: action.timestamp };
+        }
+        continue;
+      }
+      if (op === "cancel" || op === "director_cancel") {
+        const name = op === "director_cancel" ? action.name ?? action.affected_name : action.playerName;
+        const st = name ? stats[name] : null;
+        if (st) closeActive(st, "abandoned", action.timestamp);
+        continue;
+      }
+      if (op === "change") {
+        const st = stats[action.playerName];
+        if (st) {
+          closeActive(st, "abandoned", action.timestamp);
+          st.changeCount++;
+        }
+        continue;
+      }
+      if (op === "capture_partial" || op === "capture_complete" || action.actionType === "finish" || action.actionType === "contest_win") {
+        const st = stats[action.playerName];
+        if (!st) continue;
+        if (st.active && st.active.index === index && st.active.board === board) {
+          addCaptureStats(st, board, index, duration(st.active.startTs, action.timestamp));
+          st.active = null;
+        } else {
+          if (st.active) closeActive(st, "abandoned", action.timestamp);
+          st.untrackedCaptures++;
+        }
+        // 受害者（抢夺/队友完成）
+        for (const victim of action.victims || []) {
+          if (victim === action.playerName) continue;
+          const victimStats = stats[victim];
+          if (!victimStats?.active) continue;
+          if (victimStats.active.index !== index) continue;
+          const sameTeam = teamOf[victim] === teamOf[action.playerName];
+          closeActive(victimStats, "stolen", action.timestamp, sameTeam ? "teammate" : undefined);
+        }
+        continue;
+      }
+      if (op === "director_capture" || op === "director_set") {
+        const team = action.team ?? 0;
+        // 归给该队最后仍选择该格的玩家
+        let attributed: PlayerStats | null = null;
+        for (const name of allPlayers) {
+          if (teamOf[name] !== team) continue;
+          const st = stats[name];
+          if (st.active && st.active.index === index) {
+            if (!attributed || st.active.startTs > attributed.active!.startTs) attributed = st;
+          }
+        }
+        if (attributed) {
+          addCaptureStats(attributed, attributed.active!.board, index, duration(attributed.active!.startTs, action.timestamp));
+          attributed.directorAttributed++;
+          attributed.active = null;
+        }
+        for (const victim of action.victims || []) {
+          if (attributed && victim === attributed.name) continue;
+          const victimStats = stats[victim];
+          if (!victimStats?.active || victimStats.active.index !== index) continue;
+          const sameTeam = teamOf[victim] === team;
+          closeActive(victimStats, "stolen", action.timestamp, sameTeam ? "teammate" : undefined);
+        }
+        continue;
+      }
+      if (op === "director_clear") {
+        for (const name of allPlayers) {
+          const st = stats[name];
+          if (st.active && st.active.index === index) closeActive(st, "abandoned", action.timestamp);
+        }
+        continue;
+      }
+      if (op === "capture_partial" || op === "capture_complete") continue;
+    }
+
+    // ---------- 输出：基础信息 ----------
+    const teamLine = (team: any, index: number) =>
+      `${index === 0 ? "A" : "B"}队: ${(team?.members || []).map((m: any) => (m.captain ? `${m.name}(队长)` : m.name)).join(", ") || "-"}`;
+    output.push("东方Bingo对战日志");
+    output.push(`对局开始时间: ${new Date(gameStartTimestamp).toLocaleString()}`);
+    output.push(teamLine(standard.teams?.[0], 0));
+    output.push(teamLine(standard.teams?.[1], 1));
+    output.push(`最终比分: ${score[0]} - ${score[1]}`);
+    output.push("---");
+    output.push("【游戏设置】");
+    output.push(`模式: 标准赛`);
+    output.push(`盘面尺寸: ${bs}x${bs}`);
+    output.push(`收卡标准: ${isDual ? "双盘（每面 1 次）" : standard.capture_standard}`);
+    if (standard.extra_lines?.length) output.push(`额外连线: ${standard.extra_lines.length}条`);
+    output.push(`时长: ${roomConfig.game_time}分钟, 倒计时: ${roomConfig.countdown}秒, cd： ${roomConfig.cd_time}秒`);
+    output.push(`卡池：${logData.isCustomGame ? "自定义" : Config.spellVersionList.find((n) => n.type === roomConfig.spell_version)?.name || "未知"}`);
+    if (!logData.isCustomGame) {
+      const gameNames = (roomConfig.games || [])
+        .slice()
+        .sort()
+        .map((code) => Config.gameOptionList(roomConfig.spell_version).find((g) => g.code === code)?.name)
+        .filter(Boolean)
+        .join(", ");
+      output.push(`作品来源: ${gameNames || "未指定"}`);
+      output.push(`符卡难度: ${(roomConfig.ranks || []).join(", ") || "未指定"}`);
+      output.push(`盘面难度: ${Config.difficultyList.find((d) => d.value === roomConfig.difficulty)?.name || "未知"}`);
+      if ((roomConfig.blind_setting || 1) > 1) {
+        output.push(`盲盒设定: 模式${roomConfig.blind_setting - 1}, 揭示等级${roomConfig.blind_reveal_level}`);
+      }
+      if (isDual) {
+        output.push(
+          `双重盘面: ${standard.copy_board ? "复制盘面" : `差异盘面 (差异等级: ${roomConfig.diff_level})`}`
+        );
+      }
+    }
+    output.push("---");
+
+    // ---------- 输出：盘面 ----------
+    const formatBoard = (boardSpells: Spell[], title: string) => {
+      output.push(title);
+      const CELL_WIDTH = 36;
+      for (let i = 0; i < bs; i++) {
+        let row = padStart(`${i + 1} | `, 5);
+        for (let j = 0; j < bs; j++) {
+          const index = i * bs + j;
+          const spell = boardSpells[index];
+          if (!spell) continue;
+          row += padStart(`${spell.name.trim()} | `, CELL_WIDTH);
+        }
+        output.push(row);
+      }
+      output.push("【等级分布】");
+      for (let i = 0; i < bs; i++) {
+        let row = padStart(`${i + 1} | `, 5);
+        for (let j = 0; j < bs; j++) {
+          const index = i * bs + j;
+          const spell = boardSpells[index];
+          if (!spell) continue;
+          row += padStart(`${spell.star}`, 10);
+        }
+        output.push(row);
+      }
+    };
+    formatBoard(spells, isDual ? "【盘面A】" : "【盘面】");
+    if (isDual && spells2) {
+      output.push("");
+      formatBoard(spells2, "【盘面B】");
+    }
+    if (standard.extra_lines?.length) {
+      output.push("");
+      output.push("【额外连线】");
+      standard.extra_lines.forEach((line, index) => {
+        output.push(`${index + 1}. ${line.map((cell) => cellLabel(cell)).join(" -> ")}`);
+      });
+    }
+    output.push("---");
+
+    // ---------- 输出：游戏进程 ----------
+    const opLabel = (op: string) => {
+      switch (op) {
+        case "select": return "选择符卡";
+        case "cancel": return "取消选择";
+        case "capture_partial": return "收取一次";
+        case "capture_complete": return "完成收取";
+        case "grab_victim": return "被抢卡";
+        case "grab_public": return "抢卡";
+        case "director_select": return "导播选卡";
+        case "director_cancel": return "导播取消";
+        case "director_capture": return "导播收取一次";
+        case "director_set": return "导播设为收取";
+        case "director_clear": return "导播置空";
+        case "change": return "使用换卡";
+        case "refund": return "换卡返还";
+        case "pause": return "暂停比赛";
+        case "resume": return "恢复比赛";
+        default: return op;
+      }
+    };
+    output.push("【游戏进程】");
+    for (const action of actions) {
+      const op = action.op || action.actionType;
+      const index = action.spellIndex;
+      const board = captureBoardOf(action);
+      const affected = action.name ?? action.affected_name;
+      const who = affected ? `${action.playerName || "导播"} → ${affected}` : action.playerName || "导播";
+      const boardInfo = isDual && index >= 0 ? `[盘面${board === 1 ? "B" : "A"}] ` : "";
+      const location = index >= 0 ? `${boardInfo}${cellLabel(index)} ` : "";
+      const card = action.spellName ? `"${action.spellName}" ` : "";
+      const scoreNow = action.scoreNow ? `(比分：${action.scoreNow[0]}-${action.scoreNow[1]})` : "";
+      output.push(`${formatTimestamp(action.timestamp)} | ${who} ${opLabel(op)} ${location}${card}${scoreNow}`.trim());
+    }
+    output.push("---");
+
+    // ---------- 输出：玩家分析 ----------
+    output.push("【数据分析】");
+    for (const name of allPlayers) {
+      const st = stats[name];
+      const team = teamOf[name];
+      output.push(`[玩家: ${name}]（${team === 0 ? "A" : "B"}队）`);
+      output.push(...st.tasks);
+      if (st.untrackedCaptures > 0) {
+        output.push(`(有 ${st.untrackedCaptures} 次收取因无匹配选卡，未计入收卡记录)`);
+      }
+      if (st.stolenCount > 0) {
+        output.push(`(被抢 ${st.stolenCount} 次，其中队友完成 ${st.teammateStolenCount} 次)`);
+      }
+      if (st.changeCount > 0) {
+        output.push(`(使用换卡 ${st.changeCount} 次)`);
+      }
+      if (st.directorAttributed > 0) {
+        output.push(`(导播代收计入 ${st.directorAttributed} 次)`);
+      }
+      const totalStars = st.stars.reduce((sum, value, index) => sum + value * (index + 1), 0);
+      output.push(
+        `总计收取 ${st.captureActions} 张，等级分布: [${st.stars.join(",")}]，总等级：${totalStars}`
+      );
+      output.push("");
+    }
+
+    // ---------- 输出：队伍 ----------
+    for (const team of [0, 1]) {
+      let capturedCells = 0;
+      let totalStars = 0;
+      for (let index = 0; index < area; index++) {
+        if (fullyState[index] === team) {
+          capturedCells++;
+          totalStars += starOf(0, index);
+        }
+      }
+      output.push(
+        `[队伍 ${team === 0 ? "A" : "B"}] 得分 ${score[team] || 0}，收取格数 ${capturedCells}，总星级 ${totalStars}（双盘完整收取取两面较高星级）`
+      );
+      output.push("");
+    }
+
+    const formattedReplayData = this.formatStringWithLineBreaks(replayDataB64, 128);
+    output.push("\n\n--- DO NOT EDIT BELOW THIS LINE ---");
+    output.push("本局回放代码：\n");
+    output.push(formattedReplayData);
+    return output.join("\n");
+  };
+
   public formatLogForDownload = (logData: GameLogData, replayDataB64: string): string => {
     logData = this.normalizeGameLog(logData);
+    // 多人标准赛使用新的快照驱动分析
+    if (logData.standard_data) {
+      return this.formatStandardReadableLog(logData, replayDataB64);
+    }
     const { roomConfig, players, score, spells, spells2, actions, gameStartTimestamp, normalData } = logData;
     const output: string[] = [];
     // 辅助函数
@@ -1173,7 +1632,7 @@ class Replay {
           `AI参数：Lv.${roomConfig.ai_base_power} / Lv.${roomConfig.ai_experience} 策略等级：${roomConfig.ai_strategy_level} 选卡温度：${roomConfig.ai_temperature}`
         );
         let ai_pref = "";
-        for (const [gameCode, pref] of Object.entries(roomConfig.ai_preference)) {
+        for (const [gameCode, pref] of Object.entries(roomConfig.ai_preference || {})) {
           if (pref != 0) {
             const gameName =
               Config.gameOptionList(this.roomStore.roomConfig.spell_version).find((g) => g.code === gameCode)?.name ||
@@ -1365,14 +1824,11 @@ class Replay {
       playerStats[player] = {
         selectStack: [],
         totalTime: 0,
-        totalFastest: 0,
-        totalFastestWeighted: 0,
         totalStars: [0, 0, 0, 0, 0],
         completedTasks: [],
         stolenTasks: [], // For stolen cards
         untrackedFinishes: 0,
         stolenCount: 0,
-        stolenTime: 0, // Time lost to stolen cards
       };
     });
 
@@ -1442,7 +1898,6 @@ class Replay {
               });
               const duration = endTime - startTime - pauseDurationInInterval;
               if (duration > 0) {
-                opponentStats.stolenTime += duration;
                 opponentStats.stolenTasks.push(`- "${spell.name}" (被抢): ${(duration / 1000).toFixed(2)}s`);
               }
             }
@@ -1483,10 +1938,7 @@ class Replay {
             const duration = endTime - startTime - pauseDurationInInterval;
             if (duration > 0) {
               stats.totalTime += duration;
-              stats.totalFastest += spell.fastest;
               stats.totalStars[spell.star - 1] += 1;
-              stats.totalFastestWeighted +=
-                spell.fastest + 3.5 + (1 / this.getDifficultyFix(spell) - 1) * (spell.miss_time + 1.5);
               stats.completedTasks.push(`- "${spell.name}": ${(duration / 1000).toFixed(2)}s`);
             }
           } else {
@@ -1515,10 +1967,7 @@ class Replay {
           const duration = endTime - startTime - pauseDurationInInterval;
           if (duration > 0) {
             stats.totalTime += duration;
-            stats.totalFastest += spell.fastest;
             stats.totalStars[spell.star - 1] += 1;
-            stats.totalFastestWeighted +=
-              spell.fastest + 3.5 + (1 / this.getDifficultyFix(spell) - 1) * (spell.miss_time + 1.5);
             stats.completedTasks.push(`- "${spell.name}": ${(duration / 1000).toFixed(2)}s`);
           }
         } else {
@@ -1550,7 +1999,6 @@ class Replay {
             });
             const duration = endTime - startTime - pauseDurationInInterval;
             if (duration > 0) {
-              opponentStats.stolenTime += duration;
               opponentStats.stolenTasks.push(`- "${spell.name}" (被抢): ${(duration / 1000).toFixed(2)}s`);
             }
           }
@@ -1563,14 +2011,11 @@ class Replay {
       output.push(`[玩家: ${player}]`);
       const stats = playerStats[player];
 
-      // 4) Add stolen time to total time for efficiency calculation
-      const totalEffectiveTime = stats.totalTime + stats.stolenTime;
-
       output.push(...stats.completedTasks);
       output.push(...stats.stolenTasks); // Show stolen tasks in the log
 
       if (stats.untrackedFinishes > 0) {
-        output.push(`(有 ${stats.untrackedFinishes} 次收取操作因无前置选择或不匹配而未计入效率统计)`);
+        output.push(`(有 ${stats.untrackedFinishes} 次收取操作因无前置选择或不匹配，未计入收卡记录)`);
       }
       if (stats.stolenCount > 0) {
         output.push(`(有 ${stats.stolenCount} 张选择的符卡被对手抢走)`);
@@ -1581,104 +2026,7 @@ class Replay {
           ","
         )}]，总等级：${stats.totalStars.reduce((sum, value, index) => sum + value * (index + 1), 0)}`
       );
-      output.push(
-        `总收卡时间: ${formatTimestamp(totalEffectiveTime)} (收取: ${formatTimestamp(
-          stats.totalTime
-        )}, 被抢损失: ${formatTimestamp(stats.stolenTime)})`
-      );
-
-      if (Config.spellListWithTimer.includes(roomConfig.spell_version) && !isCustomGame) {
-        const efficiency =
-          stats.totalTime > 0 ? (((stats.totalFastest * 1000) / stats.totalTime) * 100).toFixed(2) : "N/A";
-        output.push(
-          `纯收卡效率: ${efficiency}% (${stats.totalFastest.toFixed(2)}s / ${(stats.totalTime / 1000).toFixed(2)}s)`
-        );
-
-        // 计算该选手在本局游戏内可行动的总时间
-        // 该选手的CD（毫秒），考虑CD修正值
-        const playerIndex = players.indexOf(player);
-        const cdModifier = playerIndex === 0 ? roomConfig.cd_modifier_a || 0 : roomConfig.cd_modifier_b || 0;
-        const playerCdMs = Math.max(1, Math.min(roomConfig.cd_time + cdModifier, roomConfig.cd_time * 3)) * 1000;
-        // 获取全局最后一次得分时间
-        let lastScoreTime = 0;
-        let actLen = actions.length - 1;
-        while (actLen >= 0) {
-          const act = actions[actLen];
-          //不区分是谁的得分行为
-          if (
-            act.actionType === "finish" ||
-            act.actionType === "contest_win" ||
-            act.actionType === "set-5" ||
-            act.actionType === "set-7"
-          ) {
-            lastScoreTime = act.timestamp;
-            break;
-          }
-          actLen--;
-        }
-        actLen = actions.length - 1;
-        //由于不是最后收卡的一方计算效率会多算一个cd，所以手动扣除这段cd
-        while (actLen >= 0) {
-          const act = actions[actLen];
-          //需要找到自己的最后一个行动
-          if (player !== act.playerName) {
-            actLen--;
-            continue;
-          }
-          //如果是收取，扣除最后得分时间与该选手最后有效行动之间的时差，最多扣除一个cd
-          if (
-            act.actionType === "finish" ||
-            act.actionType === "contest_win" ||
-            act.actionType === "set-5" ||
-            act.actionType === "set-7"
-          ) {
-            lastScoreTime -= Math.min(Math.max(0, lastScoreTime - act.timestamp), playerCdMs);
-            break;
-          }
-          //如果是选择，就扣除一个cd（已经等完了）
-          if (
-            act.actionType === "select" ||
-            act.actionType === "set-1" ||
-            act.actionType === "set-2" ||
-            act.actionType === "set-3"
-          ) {
-            lastScoreTime -= playerCdMs;
-            break;
-          }
-          actLen--;
-        }
-        // 游戏设定最大时间（毫秒）
-        const maxGameTimeMs = roomConfig.game_time * 60 * 1000;
-        // min(全局最后一次得分时间 - countdown, 游戏设定最大时间)
-        const availableTimeBase = Math.min(lastScoreTime - countdownMs, maxGameTimeMs);
-        // 计算全局总暂停时间
-        let totalPauseTime = 0;
-        let pauseStart = 0;
-        for (const action of actions) {
-          if (action.actionType === "pause") {
-            pauseStart = action.timestamp;
-          } else if (action.actionType === "resume" && pauseStart > 0) {
-            totalPauseTime += action.timestamp - pauseStart;
-            pauseStart = 0;
-          }
-        }
-        // 该选手比分
-        const playerScore = score[playerIndex] || 0;
-        // 可行动时间 = 基础可用时间 - 全局总暂停时间 - 选手CD * min(24, 选手比分 - 1)
-        const boardArea = (roomConfig.board_size || 5) * (roomConfig.board_size || 5);
-        const cdPenalty = playerCdMs * Math.min(boardArea - 1, Math.max(0, playerScore - 1));
-        const totalAvailableTime = Math.max(0, availableTimeBase - totalPauseTime - cdPenalty);
-
-        const eff_weighted =
-          totalAvailableTime > 0
-            ? (((stats.totalFastestWeighted * 1000) / totalAvailableTime) * 100).toFixed(2)
-            : "N/A";
-        output.push(
-          `总时间效率: ${eff_weighted}% (${stats.totalFastestWeighted.toFixed(2)}s / ${(
-            totalAvailableTime / 1000.0
-          ).toFixed(2)}s)`
-        );
-      }
+      output.push(`总收卡时间: ${formatTimestamp(stats.totalTime)}`);
       output.push("");
     });
 

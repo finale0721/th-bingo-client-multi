@@ -17,22 +17,47 @@
     <div class="layout-inner">
       <div class="layout-main-window">
         <router-view />
-        <div class="conn-status-group" :class="{ stale: localStore.connStatus !== 'online' }">
-          <div
-            v-for="p in roomStore.remotePlayerStatuses"
-            :key="p.name"
-            class="conn-status player-conn"
-            :class="p.online ? 'player-online' : 'player-offline'"
-            :title="p.online ? `「${p.name}」与服务器连接正常` : `「${p.name}」已断开连接`"
-          >
-            <span class="player-name">{{ p.name }}</span>
-            <span class="dot"></span>
+        <template v-if="roomStore.inRoom && !roomStore.isReplayActive">
+          <div class="team-conn-group conn-group-a" :class="{ stale: localStore.connStatus !== 'online' }">
+            <span
+              v-for="p in teamStatuses(0)"
+              :key="p.name"
+              class="member-dot"
+              :class="p.online ? 'member-online' : 'member-offline'"
+              :title="`${p.name}：${p.online ? '在线' : '离线'}`"
+            ></span>
+            <span
+              v-if="roomStore.myTeam === 0"
+              class="member-dot self-dot"
+              :class="localDotClass"
+              :title="`${localStore.username}：${connStatusText}`"
+            ></span>
           </div>
-          <div class="conn-status" :class="localStore.connStatus" :title="connStatusTip">
-            <el-icon><Connection /></el-icon>
-            <span>{{ connStatusText }}</span>
+          <div class="team-conn-group conn-group-b" :class="{ stale: localStore.connStatus !== 'online' }">
+            <span
+              v-for="p in teamStatuses(1)"
+              :key="p.name"
+              class="member-dot"
+              :class="p.online ? 'member-online' : 'member-offline'"
+              :title="`${p.name}：${p.online ? '在线' : '离线'}`"
+            ></span>
+            <span
+              v-if="roomStore.myTeam === 1"
+              class="member-dot self-dot"
+              :class="localDotClass"
+              :title="`${localStore.username}：${connStatusText}`"
+            ></span>
+            <div
+              v-if="roomStore.myTeam === null"
+              class="conn-status local-conn"
+              :class="localStore.connStatus"
+              :title="connStatusTip"
+            >
+              <el-icon><Connection /></el-icon>
+              <span>{{ connStatusText }}</span>
+            </div>
           </div>
-        </div>
+        </template>
       </div>
       <div class="layout-info-window">
         <info-window></info-window>
@@ -63,6 +88,14 @@ const connStatusTip = computed(
     }[localStore.connStatus])
 );
 const roomSettings = computed(() => roomStore.roomSettings);
+const teamStatuses = (team: number) => roomStore.remotePlayerStatuses.filter((p) => p.team === team);
+const localDotClass = computed(() =>
+  localStore.connStatus === "online"
+    ? "member-online"
+    : localStore.connStatus === "connecting"
+    ? "member-connecting"
+    : "member-offline"
+);
 const boardSize = computed(() => roomStore.inRoom ? roomStore.roomConfig.board_size || roomSettings.value.board_size || 5 : 5);
 const layoutInnerWidth = computed(() => boardSize.value === 6 ? "1508px" : "1320px");
 const mainWindowWidth = computed(() => boardSize.value === 6 ? "1148px" : "960px");
@@ -108,18 +141,49 @@ const getDarkColor = (color: string) => {
       position: relative;
       background-color: #ffffffdd;
 
-      .conn-status-group {
+      .team-conn-group {
         position: absolute;
-        top: 2px;
-        right: 2px;
+        top: 4px;
         z-index: 200;
         display: flex;
         align-items: center;
-        gap: 4px;
+        gap: 3px;
 
-        // 自身连接异常时远端状态可能已过期，灰显以示不确定
-        &.stale .player-conn {
+        &.stale .member-dot {
           opacity: 0.55;
+        }
+
+        &.conn-group-a {
+          left: 6px;
+        }
+
+        &.conn-group-b {
+          right: 6px;
+        }
+      }
+
+      .member-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background-color: #999;
+        box-shadow: 0 0 2px #0004;
+
+        &.member-online {
+          background-color: var(--el-color-success);
+        }
+
+        &.member-offline {
+          background-color: var(--el-color-danger);
+        }
+
+        &.member-connecting {
+          background-color: var(--el-color-warning);
+          animation: conn-status-pulse 1.2s ease-in-out infinite;
+        }
+
+        &.self-dot {
+          outline: 1px solid #fff;
         }
       }
 
@@ -155,29 +219,6 @@ const getDarkColor = (color: string) => {
           animation: conn-status-pulse 1.2s ease-in-out infinite;
         }
 
-        &.player-conn {
-          background-color: #303133cc;
-          max-width: 160px;
-
-          .player-name {
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-          }
-
-          .dot {
-            flex-shrink: 0;
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            background-color: var(--el-color-success);
-          }
-
-          &.player-offline .dot {
-            background-color: var(--el-color-danger);
-            animation: conn-status-pulse 1.2s ease-in-out infinite;
-          }
-        }
       }
     }
 

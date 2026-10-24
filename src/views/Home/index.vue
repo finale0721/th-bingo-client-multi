@@ -16,8 +16,8 @@
         </el-form-item>
         <el-form-item prop="soloMode">
           <div class="solo-mode-check-box">
-            <el-checkbox v-model="soloMode" @change="onChangeSoloMode">无导播模式</el-checkbox>
-            <el-checkbox v-model="addRobot" :disabled="!form.soloMode">单人练习模式</el-checkbox>
+            <el-checkbox v-model="soloMode">无导播模式</el-checkbox>
+            <el-checkbox v-model="practice">单队练习</el-checkbox>
           </div>
         </el-form-item>
       </el-form>
@@ -41,12 +41,12 @@ import RoomListDialog from "@/components/RoomListDialog.vue";
 const roomStore = useRoomStore();
 const roomId = ref("");
 const soloMode = ref(false);
-const addRobot = ref(false);
+const practice = ref(false);
 
 const form = computed(() => ({
   roomId: roomId.value,
   soloMode: soloMode,
-  addRobot: addRobot,
+  practice: practice,
 }));
 const rules = {
   roomId: [
@@ -76,7 +76,7 @@ const createRoom = () => {
   if (!formRef.value) return;
   formRef.value.validate((valid, fields) => {
     if (valid) {
-      roomStore.createRoom(roomId.value, soloMode.value, addRobot.value);
+      roomStore.createRoom(roomId.value, soloMode.value, practice.value);
     }
   });
 };
@@ -90,11 +90,6 @@ const joinRoom = () => {
   });
 };
 
-const onChangeSoloMode = (val) => {
-  if (!val) {
-    addRobot.value = val;
-  }
-};
 
 const showRoomList = ref(false);
 

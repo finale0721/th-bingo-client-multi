@@ -9,22 +9,18 @@
       @editor-cell-click="handleEditorCellClick"
     >
       <template #left>
-        <div
-          :class="{ 'page-icon': playerASide === 0, 'page-icon-reverse': playerASide === 1 }"
-          v-if="isDualBoard"
-          @click="switchDualBoardSide"
-        ></div>
         <score-board
           class="change-card"
           v-if="isBingoStandard"
           :size="48"
-          :manual="soloMode ? isPlayerA : isHost"
+          :manual="isHost"
           label="换卡次数"
           v-model="roomData.change_card_count[0]"
           @add="addChangeCardCount(0)"
           @minus="removeChangeCardCount(0)"
           :disabled="!inGame"
         ></score-board>
+        <div v-if="isBingoStandard && gameStore.changePending && myTeam === 0" class="change-pending">换卡待结算</div>
         <score-board class="spell-card-score-card" :size="30" label="得分" v-model="playerAScore"></score-board>
         <score-board class="spell-card-score-card" :size="30" :label="isBingoLink ? '已收等级' : '等级'" v-model="playerALevel"></score-board>
         <score-board
@@ -57,45 +53,34 @@
         <div v-if="isBingoLink && linkPhase === 1 && takeoverPlayerIndex === 0 && !isOwner" class="link-manage-buttons" :key="'tk-lock-a-' + takeoverUiKey">
           <span style="color: #e6a23c; font-size: 12px;">路线已被接管</span>
         </div>
-        <el-button
-          class="alert-button"
-          type="primary"
-          v-if="isHost"
-          @click="warnPlayer(roomData.names[0])"
-          :disabled="!inGame"
-        >
-          警告
-        </el-button>
-        <el-button
-          class="alert-button"
-          type="primary"
-          v-if="isHost && isDualBoard"
-          @click="hostSwitchPlayerSide(0)"
-          :disabled="!inGame"
-        >
-          换面
-        </el-button>
+        <div class="warn-controls" v-if="isHost && inGame && !roomData.practice && teamMembers(0).length > 0">
+          <el-select v-model="warnTargetA" placeholder="选择成员" size="small" class="warn-select">
+            <el-option v-for="m in teamMembers(0)" :key="m.name" :label="m.name" :value="m.name" />
+          </el-select>
+          <el-button class="alert-button" type="primary" size="small" :disabled="!warnTargetA" @click="warnPlayer(warnTargetA)">
+            警告
+          </el-button>
+        </div>
       </template>
 
       <template #right>
-        <div
-          :class="{ 'page-icon': playerBSide === 0, 'page-icon-reverse': playerBSide === 1 }"
-          v-if="isDualBoard"
-          @click="switchDualBoardSide"
-        ></div>
+        <template v-if="!roomData.practice">
         <score-board
           class="change-card"
           v-if="isBingoStandard"
           :size="48"
-          :manual="soloMode ? isPlayerB : isHost"
+          :manual="isHost"
           label="换卡次数"
           v-model="roomData.change_card_count[1]"
           @add="addChangeCardCount(1)"
           @minus="removeChangeCardCount(1)"
           :disabled="!inGame"
         ></score-board>
+        <div v-if="isBingoStandard && gameStore.changePending && myTeam === 1" class="change-pending">换卡待结算</div>
         <score-board class="spell-card-score-card" :size="30" label="得分" v-model="playerBScore"></score-board>
         <score-board class="spell-card-score-card" :size="30" :label="isBingoLink ? '已收等级' : '等级'" v-model="playerBLevel"></score-board>
+        </template>
+        <div v-else class="no-opponent-side">无对手</div>
         <score-board
           v-if="isBingoLink"
           class="spell-card-score-card"
@@ -129,31 +114,17 @@
         <div v-if="showLinkAiSpeedrun" class="link-manage-buttons">
           <el-button size="small" type="warning" @click="linkAiSpeedrun" :disabled="linkPlayerFinished(1)">速通</el-button>
         </div>
-        <el-button
-          class="alert-button"
-          type="primary"
-          v-if="isHost"
-          @click="warnPlayer(roomData.names[1])"
-          :disabled="!inGame"
-        >
-          警告
-        </el-button>
-        <el-button
-          class="alert-button"
-          type="primary"
-          v-if="isHost && isDualBoard"
-          @click="hostSwitchPlayerSide(1)"
-          :disabled="!inGame"
-        >
-          换面
-        </el-button>
+        <div class="warn-controls" v-if="isHost && inGame && !roomData.practice && teamMembers(1).length > 0">
+          <el-select v-model="warnTargetB" placeholder="选择成员" size="small" class="warn-select">
+            <el-option v-for="m in teamMembers(1)" :key="m.name" :label="m.name" :value="m.name" />
+          </el-select>
+          <el-button class="alert-button" type="primary" size="small" :disabled="!warnTargetB" @click="warnPlayer(warnTargetB)">
+            警告
+          </el-button>
+        </div>
       </template>
 
       <template #extra>
-        <div v-if="isBingoStandard && currentBoardLevelTotal > 0" class="board-level-summary">
-          <span>总等级{{ currentBoardLevelTotal }}</span>
-          <span>剩余 {{ currentBoardRemainingLevel }}</span>
-        </div>
         <game-bp v-if="isBpPhase" v-model="bpCode"></game-bp>
         <div
           :class="{ page: gameStore.currentBoard === 0, 'page-reverse': gameStore.currentBoard === 1 }"
@@ -167,9 +138,10 @@
           :size="30"
           @complete="onCountDownComplete"
           v-show="
-            (isBingoStandard && inGame) ||
-            (isBingoBp && gameStore.gameStatus === GameStatus.COUNT_DOWN) ||
-            (isBingoLink && inGame && linkPhase === 1)
+            !gameStore.isReplayMode &&
+            ((isBingoStandard && inGame) ||
+              (isBingoBp && gameStore.gameStatus === GameStatus.COUNT_DOWN) ||
+              (isBingoLink && inGame && linkPhase === 1))
           "
         ></count-down>
       </template>
@@ -225,25 +197,25 @@
         </div>
 
         <template v-else-if="!editorStore.isEditorMode">
-          <template v-if="!soloMode && isHost">
-            <el-button type="primary" v-if="!inGame && !isBpPhase" @click="editorStore.openPresetManager('select')">
-              自定义游戏
-            </el-button>
-            <el-button type="primary" v-if="!inGame && !isBpPhase" @click="startGame">开始比赛</el-button>
+          <template v-if="isHost">
+            <el-button type="primary" v-if="!inGame && !isBpPhase" @click="startGame" :disabled="!bothTeamsReady">开始比赛</el-button>
             <el-button type="primary" v-if="isBpPhase" @click="drawSpellCard" :disabled="banPick.phase < 99">
               抽取符卡
             </el-button>
             <el-button type="primary" v-if="inGame && winFlag === 0" @click="stopGame">结束比赛</el-button>
             <el-button type="primary" v-if="winFlag !== 0" @click="confirmWinner">
-              确认：{{ winFlag < 0 ? roomData.names[0] : roomData.names[1] }}获胜
+              确认：{{ winFlag < 0 ? teamLabel(0) : teamLabel(1) }}获胜
             </el-button>
           </template>
 
-          <template v-if="soloMode && isPlayerA">
-            <el-button type="primary" v-if="!inGame && !isBpPhase" @click="startGame">开始比赛</el-button>
+          <template v-if="!roomData.host && isCaptainOfTeam(0)">
+            <el-button type="primary" v-if="!inGame && !isBpPhase" @click="startGame" :disabled="!bothTeamsReady">开始比赛</el-button>
             <el-button type="primary" v-if="banPick.phase === 9999" @click="drawSpellCard">抽取符卡</el-button>
+            <el-button type="primary" v-if="isBingoStandard && winFlag !== 0 && !roomSettings.noWinningDeclaration" @click="confirmWinner">
+              确认：{{ winFlag < 0 ? teamLabel(0) : teamLabel(1) }}获胜
+            </el-button>
             <el-button type="primary" v-if="isBingoLink && winFlag !== 0" @click="confirmWinner">
-              确认：{{ winFlag < 0 ? roomData.names[0] : roomData.names[1] }}获胜
+              确认：{{ winFlag < 0 ? teamLabel(0) : teamLabel(1) }}获胜
             </el-button>
           </template>
 
@@ -268,6 +240,14 @@
                   :immediate="gameStore.alreadySelectCard"
                   text="确认收取"
                 ></confirm-select-button>
+                <el-button
+                  class="change-card-button"
+                  type="warning"
+                  @click="useChangeCard"
+                  :disabled="changeCardDisabled"
+                >
+                  换卡<span v-if="gameStore.changePending" class="change-pending-tip">（待结算）</span>
+                </el-button>
               </template>
               <template v-if="isBingoBp">
                 <el-button
@@ -320,8 +300,8 @@
             <template v-if="isBpPhase">
               <el-button
                 type="primary"
-                v-if="banPick.phase > 0 && banPick.phase < 11"
-                :disabled="!(isPlayerA && playerACanBP) && !(isPlayerB && playerBCanBP)"
+                v-if="banPick.phase > 0 && banPick.phase < 11 && (isCaptainOfTeam(0) || isCaptainOfTeam(1))"
+                :disabled="!playerACanBP && !playerBCanBP"
                 @click="playerBanPick"
                 >确定</el-button
               >
@@ -329,9 +309,6 @@
               <el-button type="primary" v-if="banPick.phase === 11" @click="confirmOpenEX(false)">不开启</el-button>
             </template>
 
-            <el-button type="primary" v-if="!inGame && !isBpPhase && isBingoStandard" @click="editorStore.openPresetManager('select')">
-              自定义游戏
-            </el-button>
           </template>
 
           <template v-if="isBingoLink && isTakeoverActive && isOwner && !isPlayer">
@@ -365,7 +342,7 @@
 
       <template #button-left-1>
         <div v-if="!gameStore.isReplayMode && !editorStore.isEditorMode">
-          <template v-if="!soloMode && isHost">
+          <template v-if="isHost">
             <template v-if="isBingoStandard || !inGame">
               <el-button size="small" :disabled="inGame" @click="resetRoom">重置房间</el-button>
             </template>
@@ -374,7 +351,7 @@
               <el-button size="small" :disabled="!inGame" v-else @click="pauseGame">暂停比赛</el-button>
             </template>
           </template>
-          <template v-if="soloMode && isPlayerA">
+          <template v-if="!roomData.host && isCaptainOfTeam(0)">
             <el-button v-if="isPlayerA && !inGame" size="small" @click="resetRoom">重置房间</el-button>
             <el-button v-if="isPlayerA && inGame" size="small" @click="stopGame">结束比赛</el-button>
           </template>
@@ -417,9 +394,7 @@
 
       <template #button-right-2>
         <template v-if="isDualBoard && roomStore.roomConfig.type == BingoType.STANDARD">
-          <el-button type="primary" @click="switchDualBoardSide">
-            {{ boardNotDecided() ? "切换盘面" : isOnCurrentBoard() ? "查看另一面" : "返回当前面" }}
-          </el-button>
+          <el-button type="primary" @click="switchDualBoardSide">切换盘面</el-button>
         </template>
       </template>
     </room-layout>
@@ -465,9 +440,10 @@ import ScoreBoard from "@/components/score-board.vue";
 import CountDown from "@/components/count-down.vue";
 import GameBp from "@/components/game-bp.vue";
 import ConfirmSelectButton from "@/components/button-with-cooldown.vue";
-import { ElButton, ElDialog, ElMessage, ElMessageBox, ElRadio, ElRadioGroup, ElSlider } from "element-plus";
+import { ElButton, ElDialog, ElMessage, ElMessageBox, ElRadio, ElRadioGroup, ElSelect, ElOption, ElSlider } from "element-plus";
 import ws from "@/utils/webSocket/WebSocketBingo";
 import { useRoomStore } from "@/store/RoomStore";
+import { useLocalStore } from "@/store/LocalStore";
 import { useGameStore } from "@/store/GameStore";
 import { WebSocketActionType, WebSocketPushActionType } from "@/utils/webSocket/types";
 import { VideoPlay, VideoPause, ArrowLeft, ArrowRight } from "@element-plus/icons-vue";
@@ -480,6 +456,7 @@ import { BoardSpec } from "@/utils/board";
 import Config from "@/config";
 
 const roomStore = useRoomStore();
+const localStore = useLocalStore();
 const gameStore = useGameStore();
 const editorStore = useEditorStore();
 const replayInstance = Replay;
@@ -512,7 +489,6 @@ const roomData = computed(() => roomStore.roomData);
 const roomSettings = computed(() => roomStore.roomSettings);
 const roomConfig = computed(() => roomStore.roomConfig);
 const boardSpec = computed(() => new BoardSpec(roomConfig.value.board_size || 5));
-const boardArea = computed(() => boardSpec.value.area);
 const soloMode = computed(() => {
   return roomStore.soloMode;
 });
@@ -521,7 +497,9 @@ const isPlayer = computed(() => roomStore.isPlayer);
 const showLinkPlayerControls = computed(() => isPlayer.value || (isBingoLink.value && isTakeoverActive.value && isOwner.value));
 const isPlayerA = computed(() => roomStore.isPlayerA);
 const isPlayerB = computed(() => roomStore.isPlayerB);
-const isOwner = computed(() => (soloMode.value ? isPlayerA.value : isHost.value));
+const myTeam = computed(() => roomStore.myTeam);
+const isOwner = computed(() => (roomData.value.host ? isHost.value : isCaptainOfTeam(0)));
+const bothTeamsReady = computed(() => roomStore.bothTeamsReady);
 const showLinkAiSpeedrun = computed(() =>
   isBingoLink.value && inGame.value && roomStore.roomConfig.use_ai && isOwner.value
 );
@@ -532,304 +510,85 @@ const isBingoBp = computed(() => roomStore.roomData.type === BingoType.BP);
 const isBingoLink = computed(() => roomStore.roomData.type === BingoType.LINK);
 
 const isDualBoard = computed(() => roomStore.roomConfig.dual_board > 0);
-const playerASide = computed(() => (isDualBoard.value ? gameStore.normalGameData.which_board_a : 0));
-const playerBSide = computed(() => (isDualBoard.value ? gameStore.normalGameData.which_board_b : 0));
-const currentBoardSpells = computed(() => {
-  const source = isDualBoard.value && gameStore.currentBoard === 1 ? gameStore.spells2 : gameStore.spells;
-  return (source || []).slice(0, boardArea.value);
-});
-const currentBoardLevelTotal = computed(() =>
-  currentBoardSpells.value.reduce((sum, spell) => sum + (spell?.star || 0), 0)
-);
-const isCurrentBoardCellCaptured = (index: number) => {
-  const status = gameStore.spellStatus[index];
-  return (
-    status === SpellStatus.A_ATTAINED ||
-    status === SpellStatus.B_ATTAINED ||
-    status === SpellStatus.BOTH_ATTAINED
-  );
-};
-const currentBoardRemainingLevel = computed(() =>
-  currentBoardSpells.value.reduce((sum, spell, index) => {
-    if (!spell || isCurrentBoardCellCaptured(index)) return sum;
-    return sum + (spell.star || 0);
-  }, 0)
-);
 
+const teamMembers = (team: number) => roomStore.teamMembers(team);
+const isCaptainOfTeam = (team: number) =>
+  teamMembers(team).some((m) => m.captain && m.name === localStore.username);
+const teamLabel = (team: number) => {
+  const teamName = team === 0 ? "A队" : "B队";
+  const captain = teamMembers(team).find((m) => m.captain);
+  return captain ? `${teamName}（${captain.name}）` : teamName;
+};
 const playerACanBP = computed(
   () =>
-    bpStatus.value === BpStatus.IS_A_BAN ||
-    bpStatus.value === BpStatus.IS_A_PICK ||
-    bpStatus.value === BpStatus.SELECT_OPEN_EX
+    isCaptainOfTeam(0) &&
+    (bpStatus.value === BpStatus.IS_A_BAN ||
+      bpStatus.value === BpStatus.IS_A_PICK ||
+      bpStatus.value === BpStatus.SELECT_OPEN_EX)
 );
 const playerBCanBP = computed(
   () =>
-    bpStatus.value === BpStatus.IS_B_BAN ||
-    bpStatus.value === BpStatus.IS_B_PICK ||
-    bpStatus.value === BpStatus.SELECT_OPEN_EX
+    isCaptainOfTeam(1) &&
+    (bpStatus.value === BpStatus.IS_B_BAN ||
+      bpStatus.value === BpStatus.IS_B_PICK ||
+      bpStatus.value === BpStatus.SELECT_OPEN_EX)
 );
-const playerASelectedIndex = computed(() => gameStore.playerASelectedIndex);
-const playerBSelectedIndex = computed(() => gameStore.playerBSelectedIndex);
-const spellCardSelected = computed(() => {
-  if (isPlayerA.value) {
-    return playerASelectedIndex.value !== -1;
+const playerASelectedIndex = computed(() => (myTeam.value === 0 ? gameStore.mySelectedIndex : -1));
+const playerBSelectedIndex = computed(() => (myTeam.value === 1 ? gameStore.mySelectedIndex : -1));
+const spellCardSelected = computed(() => gameStore.mySelectedIndex !== -1);
+const menu = computed<any[]>(() => {
+  if (roomData.value.type !== BingoType.STANDARD) return [];
+  const canOperate = isHost.value || (!roomData.value.host && isPlayer.value);
+  if (!canOperate) return [];
+  const items: any[] = [];
+  const membersA = teamMembers(0);
+  const membersB = teamMembers(1);
+  // 两队人数不等时用空占位补齐，保证两列的“收取”选项横向对齐
+  const playerRowCount = Math.max(membersA.length, membersB.length);
+  for (let i = 0; i < playerRowCount; i++) {
+    const m = membersA[i];
+    items.push(
+      m
+        ? { label: `设为选择：${m.name}`, tag: "playerA", op: "toggle_select", name: m.name }
+        : { label: "", tag: "playerA", placeholder: true }
+    );
   }
-  if (isPlayerB.value) {
-    return playerBSelectedIndex.value !== -1;
+  items.push({ label: "A队收取一次", tag: "playerA", op: "capture_once", team: 0 });
+  items.push({ label: "A队设为已收取", tag: "playerA", op: "set_captured", team: 0 });
+  for (let i = 0; i < playerRowCount; i++) {
+    const m = membersB[i];
+    items.push(
+      m
+        ? { label: `设为选择：${m.name}`, tag: "playerB", op: "toggle_select", name: m.name }
+        : { label: "", tag: "playerB", placeholder: true }
+    );
   }
-  return false;
-});
-const menu = computed<{ label: string; value: number; tag?: string; isReset?: boolean }[]>(() => {
-  let data: { label: string; value: number; tag?: string; isReset?: boolean }[] = [];
-  if (roomData.value.type === BingoType.LINK) return data;
-  switch (roomData.value.type) {
-    case BingoType.STANDARD:
-      if (soloMode.value) {
-        data = [
-          {
-            label: "置空",
-            value: 0,
-          },
-        ];
-        if (isPlayerA.value) {
-          data = [
-            ...data,
-            {
-              label: "选择",
-              value: 1,
-              tag: "playerA",
-            },
-            {
-              label: "收取",
-              value: 5,
-              tag: "playerA",
-            },
-            {
-              label: "选择",
-              value: 3,
-              tag: "playerB",
-            },
-            {
-              label: "收取",
-              value: 7,
-              tag: "playerB",
-            },
-
-            /*
-            {
-              label: "刷新",
-              value: 0x100,
-            },
-
-             */
-          ];
-        }
-        if (isPlayerB.value) {
-          data = [
-            ...data,
-            {
-              label: "选择",
-              value: 1,
-              tag: "playerA",
-            },
-            {
-              label: "收取",
-              value: 5,
-              tag: "playerA",
-            },
-            {
-              label: "选择",
-              value: 3,
-              tag: "playerB",
-            },
-            {
-              label: "收取",
-              value: 7,
-              tag: "playerB",
-            },
-          ];
-        }
-      } else {
-        if (isHost.value) {
-          data = [
-            {
-              label: "置空",
-              value: 0,
-            },
-            {
-              label: "左侧选择",
-              value: 1,
-              tag: "playerA",
-            },
-            {
-              label: "右侧选择",
-              value: 3,
-              tag: "playerB",
-            },
-            {
-              label: "两侧选择",
-              value: 2,
-            },
-            {
-              label: "左侧收取",
-              value: 5,
-              tag: "playerA",
-            },
-            {
-              label: "右侧收取",
-              value: 7,
-              tag: "playerB",
-            },
-            {
-              label: "刷新",
-              value: 0x100,
-            },
-          ];
-        }
-      }
-      break;
-    case BingoType.BP:
-      if (isHost.value) {
-        data = [
-          {
-            label: "收取失败",
-            value: 0,
-            isReset: false,
-          },
-          {
-            label: "禁用",
-            value: -1,
-          },
-          {
-            label: "置空",
-            value: 0,
-            isReset: true,
-          },
-          {
-            label: "左侧选择",
-            value: 1,
-            tag: "playerA",
-          },
-          {
-            label: "右侧选择",
-            value: 3,
-            tag: "playerB",
-          },
-          // {
-          //   label: "两侧选择",
-          //   value: 2,
-          // },
-          {
-            label: "左侧收取",
-            value: 5,
-            tag: "playerA",
-          },
-          {
-            label: "右侧收取",
-            value: 7,
-            tag: "playerB",
-          },
-          {
-            label: "刷新",
-            value: 0x100,
-          },
-        ];
-      }
-      break;
-    case BingoType.LINK:
-      if (soloMode.value) {
-        data = [
-          {
-            label: "置空",
-            value: 0,
-          },
-        ];
-        if (isPlayerA.value) {
-          data = [
-            ...data,
-            {
-              label: "收取",
-              value: 5,
-              tag: "playerA",
-            },
-          ];
-        }
-        if (isPlayerB.value) {
-          data = [
-            ...data,
-            {
-              label: "收取",
-              value: 7,
-              tag: "playerB",
-            },
-          ];
-        }
-      } else {
-        if (isHost.value) {
-          data = [
-            {
-              label: "置空",
-              value: 0,
-            },
-            {
-              label: "两侧收取",
-              value: 6,
-            },
-            {
-              label: "左侧收取",
-              value: 5,
-              tag: "playerA",
-            },
-            {
-              label: "右侧收取",
-              value: 7,
-              tag: "playerB",
-            },
-            {
-              label: "刷新",
-              value: 0x100,
-            },
-          ];
-        }
-      }
-      break;
-  }
-  return data;
+  items.push({ label: "B队收取一次", tag: "playerB", op: "capture_once", team: 1 });
+  items.push({ label: "B队设为已收取", tag: "playerB", op: "set_captured", team: 1 });
+  items.push({ label: "置空", op: "clear" });
+  return items;
 });
 
 const inGame = computed(() => roomStore.inGame);
+const isBpPhase = computed(
+  () => roomStore.banPick.phase !== 0 && (roomStore.banPick.phase < 99 || gameStore.gameStatus === GameStatus.NOT_STARTED)
+);
+/** 未开赛提示：区分无导播房、导播房旁观者、导播本人 */
+const waitingStartText = computed(() => {
+  if (!roomData.value.host) return "等待A队队长开始比赛";
+  if (isHost.value) return "请开始比赛";
+  return "等待房主开始比赛";
+});
 onMounted(() => {
-  if (!inGame.value) {
-    if (soloMode.value) {
-      if (!isBpPhase.value) layoutRef.value?.showAlert("等待左侧玩家开始比赛", "#000");
-    } else {
-      if (!isBpPhase.value) layoutRef.value?.showAlert("等待房主开始比赛", "#000");
-    }
+  if (!inGame.value && !isBpPhase.value) {
+    layoutRef.value?.showAlert(waitingStartText.value, "#000");
   } else {
     layoutRef.value?.hideAlert();
   }
 });
-const isBpPhase = computed(
-  () => roomStore.banPick.phase !== 0 && (roomStore.banPick.phase < 99 || gameStore.gameStatus === GameStatus.NOT_STARTED)
-);
-watch(
-  isBpPhase,
-  (value) => {
-    if (value) {
-      layoutRef.value?.hideAlert();
-    }
-  },
-  {
-    immediate: true,
-  }
-);
-watch([inGame, isBpPhase], ([inGame, isBpPhase]) => {
-  if (!inGame && !isBpPhase) {
-    if (soloMode.value) {
-      layoutRef.value?.showAlert("等待左侧玩家开始比赛", "#000");
-    } else {
-      layoutRef.value?.showAlert("等待房主开始比赛", "#000");
-    }
+watch([inGame, isBpPhase, waitingStartText], ([started, bpPhase, text]) => {
+  if (!started && !bpPhase) {
+    layoutRef.value?.showAlert(text, "#000");
   } else {
     layoutRef.value?.hideAlert();
   }
@@ -866,9 +625,11 @@ watch(
 const bpCode = ref("");
 const banPick = computed(() => roomStore.banPick);
 const bpStatus = computed(() => roomStore.bpStatus);
-const forceBanExVoteVisible = computed(() => banPick.value.phase === -1 && (isPlayerA.value || isPlayerB.value));
+const forceBanExVoteVisible = computed(
+  () => banPick.value.phase === -1 && (isCaptainOfTeam(0) || isCaptainOfTeam(1))
+);
 const myForceBanExVote = computed(() =>
-  isPlayerA.value ? banPick.value.a_force_ban_ex : isPlayerB.value ? banPick.value.b_force_ban_ex : 0
+  myTeam.value === 0 ? banPick.value.a_force_ban_ex : myTeam.value === 1 ? banPick.value.b_force_ban_ex : 0
 );
 
 const startBP = () => {
@@ -937,14 +698,24 @@ const selectCooldown = computed(() => {
   if (!gameStore.inited) {
     return -1;
   }
-  const c =
-    gameStore.leftCdTime >= 0
-      ? gameStore.leftCdTime
-      : isPlayerA.value
-      ? roomStore.actualCdTimeA
-      : roomStore.actualCdTimeB;
-  return c;
+  const base = myTeam.value === 0 ? roomStore.actualCdTimeA : roomStore.actualCdTimeB;
+  return gameStore.leftCdTime >= 0 ? gameStore.leftCdTime : base;
 });
+
+const changeCardDisabled = computed(
+  () =>
+    !inGame.value ||
+    gamePaused.value ||
+    gameStore.gameStatus === GameStatus.COUNT_DOWN ||
+    myTeam.value === null ||
+    gameStore.mySelectedIndex === -1 ||
+    // 待结算期间再次换卡只取消当前选择，不消耗次数，因此次数为 0 也允许点击
+    (!gameStore.changePending && gameStore.changeCardCount[myTeam.value] <= 0)
+);
+const useChangeCard = () => {
+  if (changeCardDisabled.value) return;
+  gameStore.changeCard();
+};
 
 const setCdTime = () => {
   // CD结束后归零（0=无CD剩余）。不能用-1，否则selectCooldown会回退成"完整CD长度"，
@@ -952,54 +723,37 @@ const setCdTime = () => {
   gameStore.leftCdTime = 0;
 };
 
-const getStandardSpellStar = (index: number, playerIndex: 0 | 1) => {
-  const boardMarker = gameStore.normalGameData?.get_on_which_board?.[index] || 0;
-  const useSecondBoard = playerIndex === 0 ? boardMarker === 0x2 : boardMarker === 0x20;
-  const spell = useSecondBoard ? gameStore.spells2[index] : gameStore.spells[index];
-  return spell?.star || 0;
+const getStandardSpellStar = (index: number) => {
+  if (isDualBoard.value) {
+    return Math.max(gameStore.spells[index]?.star || 0, gameStore.spells2[index]?.star || 0);
+  }
+  return gameStore.spells[index]?.star || 0;
 };
 
-const getStandardTieBreakWinner = (
-  status: number[],
-  countA: number,
-  countB: number,
-  levelA: number,
-  levelB: number
-) => {
+const getStandardTieBreakWinner = (cells: any[], countA: number, countB: number, levelA: number, levelB: number) => {
   const board = boardSpec.value;
-  if (board.area % 2 !== 0) {
-    return 0;
-  }
+  if (board.area % 2 !== 0) return 0;
   const halfArea = board.area / 2;
-  if (countA !== halfArea && countB !== halfArea) {
-    return 0;
-  }
-  if (levelA === levelB) {
-    return 0;
-  }
-
+  if (countA !== halfArea && countB !== halfArea) return 0;
+  if (levelA === levelB) return 0;
   if (!isDualBoard.value) {
     const totalLevel = gameStore.spells.slice(0, board.area).reduce((sum, spell) => sum + (spell?.star || 0), 0);
     if (countA === halfArea && levelA > totalLevel / 2) return -13;
     if (countB === halfArea && levelB > totalLevel / 2) return 13;
     return 0;
   }
-
-  const remainingMaxLevel = status.slice(0, board.area).reduce((sum, cellStatus, index) => {
-    if (cellStatus === 5 || cellStatus === 7) {
-      return sum;
-    }
-    return sum + Math.max(gameStore.spells[index]?.star || 0, gameStore.spells2[index]?.star || 0);
+  const remainingMaxLevel = cells.reduce((sum, cell, index) => {
+    if (cell?.fully_captured_by !== null && cell?.fully_captured_by !== undefined) return sum;
+    return sum + getStandardSpellStar(index);
   }, 0);
   if (countA === halfArea && levelA > levelB && levelA - levelB > remainingMaxLevel) return -13;
   if (countB === halfArea && levelB > levelA && levelB - levelA > remainingMaxLevel) return 13;
   return 0;
 };
 
-const decideStandard = (status) => {
+const decideStandard = (cells: any[]) => {
   const board = boardSpec.value;
-  const extraLines = gameStore.normalGameData?.extra_lines || [];
-  const lines = board.winningLines(extraLines);
+  const lines = board.winningLines(gameStore.extraLines || []);
   const lineCount = lines.length;
   const available: number[] = new Array(lineCount).fill(2);
   const sumArr: number[] = new Array(lineCount).fill(0);
@@ -1014,19 +768,20 @@ const decideStandard = (status) => {
   lines.forEach((line, li) => {
     line.forEach((idx) => cellToLines[idx].push(li));
   });
-  status.forEach((item: number, index: number) => {
-    if (item === 5) {
+  cells.forEach((cell: any, index: number) => {
+    const owner = cell?.fully_captured_by;
+    if (owner === 0) {
       countA++;
       scoreA += 1;
-      levelA += getStandardSpellStar(index, 0);
+      levelA += getStandardSpellStar(index);
       for (const li of cellToLines[index]) {
         if (available[li] > 0) available[li] -= 2;
         sumArr[li] -= 1;
       }
-    } else if (item === 7) {
+    } else if (owner === 1) {
       countB++;
       scoreB += 1;
-      levelB += getStandardSpellStar(index, 1);
+      levelB += getStandardSpellStar(index);
       for (const li of cellToLines[index]) {
         if (available[li] % 2 === 0) available[li] -= 1;
         sumArr[li] += 1;
@@ -1051,18 +806,13 @@ const decideStandard = (status) => {
       gamePointFlag = true;
     }
   }
-  if (gamePointFlag) {
+  if (gamePointFlag && !gameStore.isReplayMode) {
     layoutRef.value?.warnGamePoint();
   }
   oldSumArr.value = sumArr;
-  //加分的一方收卡音效
-  if ((playerAScore.value < scoreA && isPlayerA.value) || (playerBScore.value < scoreB && isPlayerB.value)) {
-    layoutRef.value?.infoCaptureCard();
-  }
 
   playerAScore.value = scoreA;
   playerBScore.value = scoreB;
-
   playerALevel.value = levelA;
   playerBLevel.value = levelB;
 
@@ -1072,36 +822,26 @@ const decideStandard = (status) => {
     } else if (countB > board.area / 2) {
       winFlag.value = 13;
     } else {
-      winFlag.value = getStandardTieBreakWinner(status, countA, countB, levelA, levelB);
+      winFlag.value = getStandardTieBreakWinner(cells, countA, countB, levelA, levelB);
     }
   }
 
   if (winFlag.value === 0 && gameStore.leftTime < 0 && countA !== countB) {
-    if (countA > countB) {
-      winFlag.value = -14;
-    } else {
-      winFlag.value = 14;
-    }
-    // if (trainingMode.value) Mit.emit("ai_game_over");
+    winFlag.value = countA > countB ? -14 : 14;
   }
 
-  if (soloMode.value && winFlag.value !== 0) {
-    // if (trainingMode.value) Mit.emit("ai_game_over");
-    //confirmWinner();
-    //如果没有导播...
+  if (gameStore.isReplayMode) return;
+  if (!roomData.value.host) {
     if (winFlag.value !== 0) {
-      //单人练习模式允许关闭胜利判定
-      if (roomStore.practiceMode && roomSettings.value.noWinningDeclaration) {
+      if (roomSettings.value.noWinningDeclaration) {
         layoutRef.value?.hideAlert();
       } else {
-        //否则由左侧玩家决定胜负
-        layoutRef.value?.showAlert("已满足胜利条件，等待左侧玩家判断胜负", "red");
+        layoutRef.value?.showAlert("已满足胜利条件，等待A队队长判断胜负", "red");
       }
     } else {
       layoutRef.value?.hideAlert();
     }
-  }
-  if (!soloMode.value && !isHost.value) {
+  } else if (!isHost.value) {
     if (winFlag.value !== 0) {
       layoutRef.value?.showAlert("已满足胜利条件，等待房主判断胜负", "red");
     } else {
@@ -1599,23 +1339,17 @@ watch(
 );
 
 watch(
-  () => gameStore.spellStatus,
-  (status) => {
-    if (status && status.length) {
-      if (isBingoStandard.value) {
-        decideStandard(status);
-      }
-      if (isBingoBp.value) {
-        decideBp(status);
-      }
+  [
+    () => gameStore.cells,
+    () => gameStore.cells2,
+    () => gameStore.currentBoard,
+    () => gameStore.spells,
+    () => gameStore.spells2,
+  ],
+  ([cells, cells2]) => {
+    if (isBingoStandard.value && cells && cells.length) {
+      decideStandard(isDualBoard.value && gameStore.currentBoard === 1 && cells2?.length ? cells2 : cells);
     }
-
-    // if (isBingoLink.value) {
-    //   winFlag.value = 0;
-    //   if (newVal.link_data) {
-    //     decideLink(newVal);
-    //   }
-    // }
   },
   { deep: true, immediate: true }
 );
@@ -1626,9 +1360,11 @@ const startGame = () => {
     startBP();
   } else {
     roomStore.applyCustomCardPoolSelection();
-    gameStore.startGame(roomStore.getStartGameCustomPoolData()).then(() => {
-      roomStore.updateChangeCardCount(roomData.value.names[0], roomSettings.value.playerA.changeCardCount);
-      roomStore.updateChangeCardCount(roomData.value.names[1], roomSettings.value.playerB.changeCardCount);
+    gameStore.startGame({
+      ...roomStore.getStartGameCustomPoolData(),
+      change_card_base_a: roomSettings.value.playerA.changeCardCount,
+      change_card_base_b: roomSettings.value.playerB.changeCardCount,
+    }).then(() => {
       if (isBingoLink.value) gameStore.linkSetPhase(1);
       if (isBingoLink.value) {
         countdownRef.value?.stop();
@@ -1642,9 +1378,11 @@ const startGame = () => {
 };
 const drawSpellCard = () => {
   roomStore.applyCustomCardPoolSelection();
-  gameStore.startGame(roomStore.getStartGameCustomPoolData()).then(() => {
-    roomStore.updateChangeCardCount(roomData.value.names[0], roomSettings.value.playerA.changeCardCount);
-    roomStore.updateChangeCardCount(roomData.value.names[1], roomSettings.value.playerB.changeCardCount);
+  gameStore.startGame({
+    ...roomStore.getStartGameCustomPoolData(),
+    change_card_base_a: roomSettings.value.playerA.changeCardCount,
+    change_card_base_b: roomSettings.value.playerB.changeCardCount,
+  }).then(() => {
     layoutRef.value?.hideAlert();
   });
 };
@@ -1677,7 +1415,7 @@ const stopGame = () => {
               value: 0,
             },
             {
-              default: () => roomData.value.names[0] + "获胜",
+              default: () => teamLabel(0) + "获胜",
             }
           ),
           h(
@@ -1686,7 +1424,7 @@ const stopGame = () => {
               value: 1,
             },
             {
-              default: () => roomData.value.names[1] + "获胜",
+              default: () => teamLabel(1) + "获胜",
             }
           ),
         ]
@@ -1743,17 +1481,27 @@ watch(
 );
 const confirmSelect = () => {
   gameStore.alreadySelectCard = true;
-  gameStore.selectSpell(selectedSpellIndex.value).then(() => {
+  gameStore.selectSpell(selectedSpellIndex.value, gameStore.currentBoard).then(() => {
     gameModeSelectedSpellIndex.value = -1;
   });
-  if (isDualBoard.value) switchToSelfPage();
 };
 const confirmAttained = () => {
-  if (isDualBoard.value) switchToSelfPage();
-  gameStore.finishSpell(isPlayerA.value ? playerASelectedIndex.value : playerBSelectedIndex.value);
+  gameStore.finishSpell(gameStore.mySelectedIndex);
 };
+const warnTargetA = ref("");
+const warnTargetB = ref("");
+watch(
+  () => roomStore.roomData.teams,
+  () => {
+    if (warnTargetA.value && !teamMembers(0).some((m) => m.name === warnTargetA.value)) warnTargetA.value = "";
+    if (warnTargetB.value && !teamMembers(1).some((m) => m.name === warnTargetB.value)) warnTargetB.value = "";
+  },
+  { deep: true }
+);
 const warnPlayer = (name) => {
-  return ws.send(WebSocketActionType.GM_WARN_PLAYER, { name });
+  if (!name) return;
+  // 服务端错误（如对方离线）由 WebSocket 层统一用 ElMessage 提示
+  return ws.send(WebSocketActionType.GM_WARN_PLAYER, { name }).catch(() => {});
 };
 const onCountDownComplete = () => {
   if (isBingoLink.value) {
@@ -1775,10 +1523,12 @@ const onCountDownComplete = () => {
     }
   } else if (gameStore.gameStatus === GameStatus.STARTED) {
     gameStore.gameStatus = GameStatus.ENDED;
-    if (!isHost.value) {
+    if (!roomData.value.host) {
+      layoutRef.value?.showAlert("游戏时间到，等待A队队长判断胜负", "red");
+    } else if (!isHost.value) {
       layoutRef.value?.showAlert("游戏时间到，等待房主判断胜负", "red");
     } else {
-      layoutRef.value?.showAlert("游戏时间到，等待左侧玩家判断胜负", "red");
+      layoutRef.value?.showAlert("游戏时间到，请判断胜负", "red");
     }
   }
 };
@@ -1793,76 +1543,16 @@ const resetRoom = () => {
     })
     .catch(() => {});
 };
-const addChangeCardCount = (index: number) => {
-  roomStore.updateChangeCardCount(roomData.value.names[index], roomData.value.change_card_count[index] + 1);
+const addChangeCardCount = (team: number) => {
+  roomStore.updateChangeCardCount(team, roomData.value.change_card_count[team] + 1);
 };
-const removeChangeCardCount = (index: number) => {
-  roomStore.updateChangeCardCount(roomData.value.names[index], roomData.value.change_card_count[index] - 1);
+const removeChangeCardCount = (team: number) => {
+  roomStore.updateChangeCardCount(team, Math.max(0, roomData.value.change_card_count[team] - 1));
 };
 
 const switchDualBoardSide = () => {
+  // 盘面视图是纯客户端状态，切换不发请求
   gameStore.currentBoard = 1 - gameStore.currentBoard;
-  //仅倒计时期间且未实际选择时允许实际的盘面转换
-  if (boardNotDecided()) {
-    ws.send(WebSocketActionType.NORMAL_DUAL_BOARD_CHANGE, {
-      player: isPlayerA.value ? 0 : 1,
-      to: gameStore.currentBoard,
-    });
-  }
-};
-const switchToSelfPage = () => {
-  if (!boardNotDecided()) {
-    gameStore.currentBoard = isPlayerA.value ? playerASide.value : playerBSide.value;
-  }
-};
-const switchSideForce = (playerId: number) => {
-  ws.send(WebSocketActionType.NORMAL_DUAL_BOARD_CHANGE, {
-    player: playerId,
-    to: playerId === 0 ? 1 - playerASide.value : 1 - playerBSide.value,
-  });
-};
-const hostSwitchPlayerSide = (playerId: number) => {
-  ElMessageBox.confirm(`是否改变玩家 ` + roomStore.roomData.names[playerId] + ` 到另一面？`, "警告", {
-    confirmButtonText: "确认",
-    cancelButtonText: "取消",
-    type: "warning",
-  })
-    .then(() => {
-      switchSideForce(playerId);
-    });
-};
-
-ws.on(WebSocketPushActionType.PUSH_NORMAL_DUAL_BOARD_CHANGE, (data) => {
-  const playerIndex = data!.playerId;
-  const toSide = data!.to;
-  playerIndex === 0
-    ? (gameStore.normalGameData.which_board_a = toSide)
-    : (gameStore.normalGameData.which_board_b = toSide);
-  if (isPlayerA.value) {
-    gameStore.currentBoard = gameStore.normalGameData.which_board_a;
-  }
-  if (isPlayerB.value) {
-    gameStore.currentBoard = gameStore.normalGameData.which_board_b;
-  }
-});
-//不是选手，始终为查看模式
-//是选手，只有倒计时期间且未实际选卡才可自由切换，其余情况以服务端为准
-const boardNotDecided = () => {
-  if (gameStore.isReplayMode) return false;
-  return isPlayer.value && gameStore.gameStatus === GameStatus.COUNT_DOWN && !spellCardSelected.value;
-};
-//不允许自由切换时，判断选手是否与服务端最近返回的数据相符
-const isOnCurrentBoard = () => {
-  if (boardNotDecided()) {
-    return true;
-  }
-  if (isPlayerA.value) {
-    return gameStore.currentBoard === gameStore.normalGameData.which_board_a;
-  }
-  if (isPlayerB.value) {
-    return gameStore.currentBoard === gameStore.normalGameData.which_board_b;
-  }
-  return true;
 };
 
 // Auto-switch functionality for dual boards
@@ -2147,6 +1837,39 @@ const handleShuffleSpells = () => {
 </script>
 
 <style lang="scss" scoped>
+.warn-controls {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  margin-top: 10px;
+
+  .warn-select {
+    width: 96px;
+  }
+}
+
+.change-pending {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #e6a23c;
+}
+
+.no-opponent-side {
+  margin-top: 20px;
+  font-size: 16px;
+  color: #909399;
+}
+
+.change-card-button {
+  margin-left: 10px;
+}
+
+.change-pending-tip {
+  font-size: 12px;
+  opacity: 0.75;
+}
+
 .force-ban-ex-content {
   p {
     margin: 0 0 8px;
@@ -2190,25 +1913,6 @@ const handleShuffleSpells = () => {
   border: 1px solid #000;
   background-color: var(--bg-color-reverse);
   cursor: pointer;
-}
-.board-level-summary {
-  position: absolute;
-  top: -30px;
-  left: 50%;
-  z-index: 120;
-  display: flex;
-  gap: 14px;
-  align-items: center;
-  transform: translateX(-50%);
-  padding: 4px 12px;
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.92);
-  color: #303133;
-  font-size: 13px;
-  line-height: 18px;
-  white-space: nowrap;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
-  pointer-events: none;
 }
 .page {
   position: absolute;

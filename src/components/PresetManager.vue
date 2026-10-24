@@ -257,7 +257,7 @@ import { useEditorStore } from '@/store/EditorStore';
 import { useGameStore } from '@/store/GameStore';
 import { useRoomStore } from '@/store/RoomStore';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { ElDialog, ElButton, ElButtonGroup, ElTable, ElTableColumn, ElPagination, ElInput, ElTag, ElAlert, ElResult, ElIcon } from 'element-plus';
+import { ElDialog, ElButton, ElButtonGroup, ElTable, ElTableColumn, ElPagination, ElInput, ElTag, ElAlert, ElResult, ElIcon, ElDivider } from 'element-plus';
 import { InfoFilled, WarningFilled } from '@element-plus/icons-vue';
 import { EditorPreset, Spell } from "@/types";
 

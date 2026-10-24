@@ -1,4 +1,4 @@
-import { BingoType, BpStatus } from "@/types";
+import { BingoType, BpStatus, RoomTeamInfo, RoomTeamMemberInfo } from "@/types";
 import { defineStore } from "pinia";
 import { computed, ref, reactive, watch, nextTick } from "vue";
 import { useLocalStore } from "./LocalStore";
@@ -10,8 +10,6 @@ import { useRoute, useRouter } from "vue-router";
 import { useCustomCardPoolStore } from "@/store/CustomCardPoolStore";
 import { useOnlineCustomPoolStore } from "@/store/OnlineCustomPoolStore";
 import pako from "pako";
-
-const ROBOT_NAME = "训练用毛玉";
 
 export const useRoomStore = defineStore("room", () => {
   const localStore = useLocalStore();
@@ -34,11 +32,55 @@ export const useRoomStore = defineStore("room", () => {
   };
   const inRoom = computed(() => isReplayActive.value || isHost.value || isPlayer.value || isWatcher.value);
   const inGame = computed(() => roomData.started);
-  const isPlayerA = computed(() => roomData.names[0] === localStore.username);
-  const isPlayerB = computed(() => roomData.names[1] === localStore.username);
-  const isPlayer = computed(() => isPlayerA.value || isPlayerB.value);
+  /** 当前用户对应的成员（非选手为 null） */
+  const myMember = computed(() => {
+    for (const team of roomData.teams || []) {
+      const found = team.members.find((m) => m.name === localStore.username);
+      if (found) return found;
+    }
+    return null;
+  });
+  /** 当前用户所在队伍：0=A，1=B，null=非选手 */
+  const myTeam = computed<number | null>(() => {
+    const teams = roomData.teams || [];
+    for (let i = 0; i < teams.length; i++) {
+      if (teams[i].members.some((m) => m.name === localStore.username)) return i;
+    }
+    return null;
+  });
+  const isCaptain = computed(() => !!myMember.value?.captain);
+  const isPlayerA = computed(() => myTeam.value === 0);
+  const isPlayerB = computed(() => myTeam.value === 1);
+  const isPlayer = computed(() => myTeam.value !== null);
   const isWatcher = computed(() => roomData.watchers.indexOf(localStore.username) !== -1);
   const isHost = computed(() => roomData.host === localStore.username);
+  const rosterLocked = computed(() => !!roomData.roster_locked);
+  const teamMembers = (team: number) => (roomData.teams || [])[team]?.members || [];
+  /** 按加入顺序混排的成员列表；切队不改变显示位置 */
+  const orderedMembers = computed(() => {
+    const list: Array<RoomTeamMemberInfo & { team: number }> = [];
+    (roomData.teams || []).forEach((team, ti) => {
+      team.members.forEach((m, idx) => {
+        list.push({
+          ...m,
+          team: ti,
+          order: typeof m.order === "number" ? m.order : ti * 1000 + idx,
+        });
+      });
+    });
+    return list.sort((a, b) => a.order - b.order);
+  });
+  const isTeamEmpty = (team: number) => teamMembers(team).length === 0;
+  const bothTeamsReady = computed(() => {
+    if (roomData.practice) {
+      const a = teamMembers(0);
+      return a.length > 0 && a.filter((m) => m.captain).length === 1;
+    }
+    return [0, 1].every((i) => {
+      const members = teamMembers(i);
+      return members.length > 0 && members.filter((m) => m.captain).length === 1;
+    });
+  });
   const inMatch = computed(() => {
     const score = roomData.score;
     const totalScore = score[0] + score[1];
@@ -49,30 +91,23 @@ export const useRoomStore = defineStore("room", () => {
     }
   });
   const soloMode = computed(() => !roomData.host);
-  //const practiceMode = computed(() => !roomData.host && roomData.names[1] === "训练用毛玉");
-  const practiceMode = computed(() => roomData.names[1] === ROBOT_NAME);
+  const practiceMode = computed(() => !!roomData.practice);
 
-  //远端选手的连接状态（自己由 connStatus 指示器负责）：选手只看对方，导播/观众看双方；机器人没有连接状态不显示
-  type RemotePlayerStatus = { name: string; online: boolean };
+  //成员连接状态，按队伍分组（自己由本地指示器负责）
+  type RemotePlayerStatus = { name: string; online: boolean; team: number };
   const remotePlayerStatuses = computed<RemotePlayerStatus[]>(() => {
     // 回放中的选手是历史记录，实时连接状态没有意义，隐藏指示器
     if (!inRoom.value || isReplayActive.value) return [];
     const onlineMap = roomData.players_online || {};
-    const toEntry = (index: number): RemotePlayerStatus | null => {
-      const name = roomData.names[index];
-      if (!name || name === ROBOT_NAME) return null;
-      //缺少条目视为在线：能出现在座位上说明刚执行过操作
-      return { name, online: onlineMap[name] ?? true };
-    };
-    if (isPlayer.value) {
-      const opponentIndex = roomData.names[0] === localStore.username ? 1 : 0;
-      const entry = toEntry(opponentIndex);
-      return entry ? [entry] : [];
+    const result: RemotePlayerStatus[] = [];
+    for (let team = 0; team < (roomData.teams || []).length; team++) {
+      for (const member of roomData.teams[team].members) {
+        if (member.name === localStore.username) continue;
+        // 缺少条目视为在线：能出现在座位上说明刚执行过操作
+        result.push({ name: member.name, online: onlineMap[member.name] ?? true, team });
+      }
     }
-    if (isHost.value || isWatcher.value) {
-      return [toEntry(0), toEntry(1)].filter((entry): entry is RemotePlayerStatus => !!entry);
-    }
-    return [];
+    return result;
   });
 
   const gameTimeLimit = {};
@@ -190,6 +225,8 @@ export const useRoomStore = defineStore("room", () => {
     } as Record<number, LinkBoardSettings>,
     custom_card_pool_enabled: false,
     pick_guarantee_count: 0,
+    capture_standard: 1,
+    copy_board: false,
   });
 
   //加载本地设置
@@ -209,6 +246,8 @@ export const useRoomStore = defineStore("room", () => {
     if (roomSettings.link_connectivity === undefined) roomSettings.link_connectivity = 8;
     if (roomSettings.custom_card_pool_enabled === undefined) roomSettings.custom_card_pool_enabled = false;
     if (roomSettings.pick_guarantee_count === undefined) roomSettings.pick_guarantee_count = 0;
+    if (roomSettings.capture_standard === undefined) roomSettings.capture_standard = 1;
+    if (roomSettings.copy_board === undefined) roomSettings.copy_board = false;
     if (!Array.isArray(roomSettings.systemCardPoolCheckList)) {
       roomSettings.systemCardPoolCheckList = [...roomSettings.checkList];
     }
@@ -220,6 +259,8 @@ export const useRoomStore = defineStore("room", () => {
         ? roomSettings.customCardPoolCheckList
         : roomSettings.systemCardPoolCheckList),
     ];
+    // 多人版只支持标准赛，忽略历史设置里的 BP/Link 类型
+    roomSettings.type = BingoType.STANDARD;
     normalizeBoardSizeCaches(savedSettings || {});
     normalizeLinkBoardSettingsCache(savedSettings || {});
     normalizeLinkSettings();
@@ -563,6 +604,8 @@ export const useRoomStore = defineStore("room", () => {
     link_end_b: 20,
     custom_card_pool_enabled: false,
     pick_guarantee_count: 0,
+    capture_standard: 1,
+    copy_board: false,
   });
 
   const getRoomConfig = () => {
@@ -597,6 +640,8 @@ export const useRoomStore = defineStore("room", () => {
         if (i === "dual_board") roomSettings.dual_board = data[i];
         if (i === "spell_version") roomSettings.spell_version = data[i];
         if (i === "use_ai") roomSettings.use_ai = data[i];
+        if (i === "capture_standard") roomSettings.capture_standard = data[i];
+        if (i === "copy_board") roomSettings.copy_board = data[i];
       }
       if (roomData.hasOwnProperty(i)) {
         roomData[i] = data[i];
@@ -614,7 +659,8 @@ export const useRoomStore = defineStore("room", () => {
       | "board_size" | "extra_line_count" | "hidden_select_threshold_a" | "hidden_select_threshold_b"
       | "link_level_coefficient" | "link_fastest_coefficient" | "link_connectivity"
       | "link_disabled_idx" | "link_start_a" | "link_end_a" | "link_start_b" | "link_end_b"
-      | "custom_card_pool_enabled" | "custom_card_pool" | "pick_guarantee_count",
+      | "custom_card_pool_enabled" | "custom_card_pool" | "pick_guarantee_count"
+      | "capture_standard" | "copy_board",
   ) => {
     normalizeRoomSettingsForGameType();
     syncActiveCardPoolGameSelection();
@@ -666,6 +712,8 @@ export const useRoomStore = defineStore("room", () => {
       link_end_b: roomSettings.link_end_b,
       custom_card_pool_enabled: customCardPoolActive.value,
       pick_guarantee_count: roomSettings.pick_guarantee_count,
+      capture_standard: roomSettings.capture_standard,
+      copy_board: roomSettings.copy_board,
     };
     const params: any = {};
     if (key) {
@@ -711,15 +759,18 @@ export const useRoomStore = defineStore("room", () => {
   //房间数据
   const roomData = reactive({
     rid: "", // 房间名
-    type: BingoType.STANDARD, // 1-标准赛，2-BP赛，3-link赛
-    host: "", // 房主的名字
-    names: ["", ""], // 玩家名字列表，一定有2个，没有人则对应位置为空
-    change_card_count: [1, 2], // 换卡次数，一定有2个，和上面的names一一对应
-    started: false, // 是否已经开始
-    score: [0, 0], // 比分，一定有2个，和上面的names一一对应
-    watchers: [] as string[], // 观众名字列表，有几个就是几个
-    last_winner: -1, // 上一场是谁赢，0或1，-1表示没有上一场
-    players_online: {} as { [name: string]: boolean }, // 两位选手到服务器的连接状态，key为玩家名
+    type: BingoType.STANDARD, // 1-标准赛
+    host: "", // 房主的名字；无导播房为空字符串
+    names: ["", ""], // 过渡字段：A 队第一人 / B 队第一人
+    change_card_count: [0, 0], // 过渡字段：A/B 队共享换卡次数
+    started: false,
+    score: [0, 0], // 系列赛比分 A/B
+    watchers: [] as string[],
+    last_winner: -1, // 上一场获胜队伍，0或1，-1表示没有上一场
+    players_online: {} as { [name: string]: boolean },
+    teams: [] as RoomTeamInfo[],
+    practice: false,
+    roster_locked: false,
   });
   const setRoomData = (data) => {
     if (data.room_config) {
@@ -736,11 +787,21 @@ export const useRoomStore = defineStore("room", () => {
         roomData[i] = data[i];
       }
     }
+    if (Array.isArray(data.teams)) {
+      roomData.teams = data.teams;
+      roomData.names = [data.teams[0]?.members?.[0]?.name || "", data.teams[1]?.members?.[0]?.name || ""];
+      roomData.change_card_count = [
+        data.teams[0]?.change_card_count ?? 0,
+        data.teams[1]?.change_card_count ?? 0,
+      ];
+    }
+    if (data.practice !== undefined) roomData.practice = !!data.practice;
+    if (data.roster_locked !== undefined) roomData.roster_locked = !!data.roster_locked;
     if (data.room_config && (roomData.host === localStore.username || (!roomData.host && roomData.names[0] === localStore.username))) {
       applyRoomConfig(data.room_config, true, true);
     }
   };
-  const createRoom = (rid: string, soloMode: boolean, addRobot: boolean) => {
+  const createRoom = (rid: string, soloMode: boolean, practiceRoom: boolean) => {
     normalizeRoomSettingsForGameType();
     syncActiveCardPoolGameSelection();
     applyCustomCardPoolSelection();
@@ -787,9 +848,12 @@ export const useRoomStore = defineStore("room", () => {
           link_end_b: roomSettings.link_end_b,
           custom_card_pool_enabled: customCardPoolActive.value,
           pick_guarantee_count: roomSettings.pick_guarantee_count,
+          capture_standard: roomSettings.capture_standard,
+          copy_board: roomSettings.copy_board,
+          practice: practiceRoom,
         },
-        solo: soloMode,
-        add_robot: addRobot,
+        solo: soloMode || practiceRoom,
+        practice: practiceRoom,
       })
       .then((data) => {
         roomId.value = rid;
@@ -806,12 +870,15 @@ export const useRoomStore = defineStore("room", () => {
     roomData.type = BingoType.STANDARD;
     roomData.host = "";
     roomData.names = ["", ""];
-    roomData.change_card_count = [1, 2];
+    roomData.change_card_count = [0, 0];
     roomData.started = false;
     roomData.score = [0, 0];
     roomData.watchers = [] as string[];
     roomData.last_winner = -1;
     roomData.players_online = {};
+    roomData.teams = [];
+    roomData.practice = false;
+    roomData.roster_locked = false;
   };
   const getRoomData = () => {
     return ws
@@ -838,12 +905,24 @@ export const useRoomStore = defineStore("room", () => {
       })
       .catch(() => {});
   };
-  ws.on<{ name: string; position: number }>(WebSocketPushActionType.PUSH_JOIN_ROOM, (data) => {
-    if (data!.position !== -1) {
-      roomData.names[data!.position] = data!.name;
-    } else {
-      roomData.watchers.push(data!.name);
-    }
+  // 阵容变更统一由 push_roster_update 全量自愈
+  ws.on(WebSocketPushActionType.PUSH_ROSTER_UPDATE, (data: any) => {
+    if (!data) return;
+    roomData.teams = data.teams || [];
+    roomData.watchers = data.watchers || [];
+    roomData.started = !!data.started;
+    roomData.roster_locked = !!data.roster_locked;
+    roomData.practice = !!data.practice;
+    roomData.host = data.host || "";
+    roomData.names = [data.teams?.[0]?.members?.[0]?.name || "", data.teams?.[1]?.members?.[0]?.name || ""];
+    roomData.score = [data.teams?.[0]?.score ?? 0, data.teams?.[1]?.score ?? 0];
+    roomData.change_card_count = [
+      data.teams?.[0]?.change_card_count ?? 0,
+      data.teams?.[1]?.change_card_count ?? 0,
+    ];
+    roomData.players_online = Object.fromEntries(
+      roomData.teams.flatMap((team) => team.members.map((m) => [m.name, m.online]))
+    );
   });
 
   const leaveRoom = () => {
@@ -855,21 +934,9 @@ export const useRoomStore = defineStore("room", () => {
       .catch((e) => {});
   };
   ws.on<{ name: string }>(WebSocketPushActionType.PUSH_LEAVE_ROOM, (data) => {
+    // 其他人离开时由紧随其后的 push_roster_update 全量修正
     if (data!.name === localStore.username) {
       resetRoomData();
-      return;
-    }
-    for (let i = 0; i < roomData.names.length; i++) {
-      if (roomData.names[i] === data!.name) {
-        roomData.names[i] = "";
-        return;
-      }
-    }
-    for (let i = 0; i < roomData.watchers.length; i++) {
-      if (roomData.watchers[i] === data!.name) {
-        roomData.watchers.splice(i, 1);
-        return;
-      }
     }
   });
 
@@ -881,39 +948,35 @@ export const useRoomStore = defineStore("room", () => {
     resetBanPick();
   });
 
-  const standUp = () => {
-    return ws.send(WebSocketActionType.STAND_UP);
+  const standUp = (name?: string) => {
+    return ws.send(WebSocketActionType.STAND_UP, name ? { name } : null);
   };
-  ws.on<{ name: string }>(WebSocketPushActionType.PUSH_STAND_UP, (data) => {
-    for (let i = 0; i < roomData.names.length; i++) {
-      if (roomData.names[i] === data!.name) {
-        roomData.names[i] = "";
-        roomData.watchers.push(data!.name);
-        return;
-      }
-    }
-  });
 
-  const sitDown = () => {
-    return ws.send(WebSocketActionType.SIT_DOWN);
+  const sitDown = (name?: string, team?: number) => {
+    const payload: any = {};
+    if (name) payload.name = name;
+    if (team !== undefined) payload.team = team;
+    return ws.send(WebSocketActionType.SIT_DOWN, Object.keys(payload).length ? payload : null);
   };
-  ws.on<{ name: string; position: number }>(WebSocketPushActionType.PUSH_SIT_DOWN, (data) => {
-    for (let i = 0; i < roomData.watchers.length; i++) {
-      if (roomData.watchers[i] === data!.name) {
-        roomData.watchers.splice(i, 1);
-        roomData.names[data!.position] = data!.name;
-        return;
-      }
-    }
-  });
 
-  const updateChangeCardCount = (name: string, count: number) => {
-    return ws.send(WebSocketActionType.UPDATE_CHANGE_CARD_COUNT, { name, count });
+  const switchTeam = (to: number, name?: string) => {
+    const payload: any = { to };
+    if (name) payload.name = name;
+    return ws.send(WebSocketActionType.SWITCH_TEAM, payload);
   };
-  ws.on(WebSocketPushActionType.PUSH_UPDATE_CHANGE_CARD_COUNT, ({ name, count }) => {
-    const index = roomData.names.indexOf(name);
-    if (index == -1) return;
-    roomData.change_card_count[index] = count;
+
+  const toggleCaptain = (name?: string) => {
+    return ws.send(WebSocketActionType.TOGGLE_CAPTAIN, name ? { name } : {});
+  };
+
+  const updateChangeCardCount = (team: number, count: number) => {
+    return ws.send(WebSocketActionType.UPDATE_CHANGE_CARD_COUNT, { team, count });
+  };
+  ws.on(WebSocketPushActionType.PUSH_UPDATE_CHANGE_CARD_COUNT, ({ team, count }) => {
+    if (team !== 0 && team !== 1) return;
+    if (!roomData.teams[team]) return;
+    roomData.teams[team].change_card_count = count;
+    roomData.change_card_count[team] = count;
   });
 
   ws.on<{ players_online: { [name: string]: boolean } }>(WebSocketPushActionType.PUSH_PLAYER_STATUS, (data) => {
@@ -1028,6 +1091,14 @@ export const useRoomStore = defineStore("room", () => {
     isPlayerB,
     isWatcher,
     isHost,
+    myMember,
+    myTeam,
+    isCaptain,
+    teamMembers,
+    orderedMembers,
+    isTeamEmpty,
+    bothTeamsReady,
+    rosterLocked,
     createRoom,
     applyRoomConfig,
     updateRoomConfig,
@@ -1038,6 +1109,8 @@ export const useRoomStore = defineStore("room", () => {
     resetRoom,
     standUp,
     sitDown,
+    switchTeam,
+    toggleCaptain,
     updateChangeCardCount,
     banPick,
     inMatch,

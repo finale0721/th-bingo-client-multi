@@ -32,11 +32,64 @@
                 </el-form-item>
                 <el-form-item label="房间模式：">{{ roomData.host ? "导播模式" : "无导播模式" }}</el-form-item>
                 <el-form-item v-if="roomData.host" label="导播：">{{ roomData.host }}</el-form-item>
-                <el-form-item label="左侧玩家：">{{ roomData.names[0] }}</el-form-item>
-                <el-form-item label="右侧玩家：">{{ roomData.names[1] }}</el-form-item>
+                <el-form-item label="队伍成员：">
+                  <div class="team-member-list">
+                    <div
+                      v-for="m in rosterMembers"
+                      :key="m.name"
+                      class="team-member-card"
+                      :class="m.team === 0 ? 'team-a' : 'team-b'"
+                    >
+                      <span
+                        class="team-color-bar"
+                        :class="{ clickable: canMoveMember(m.team, m) }"
+                        :title="canMoveMember(m.team, m) ? `切换到${m.team === 0 ? 'B' : 'A'}队` : ''"
+                        @click.stop="onColorBarClick(m)"
+                      ></span>
+                      <span class="member-name" :title="m.name">{{ m.name }}</span>
+                      <span v-if="m.name === localStore.username" class="me-tag">你</span>
+                      <span
+                        v-if="canManageRoster"
+                        class="identity-btn"
+                        title="设为观众"
+                        @click.stop="demoteMember(m)"
+                      >观众</span>
+                      <span
+                        v-if="m.captain"
+                        class="captain-crown"
+                        :class="{ clickable: canToggleCaptain(m.team, m) }"
+                        :title="canToggleCaptain(m.team, m) ? '取消队长' : '队长'"
+                        @click.stop="onCrownClick(m.team, m)"
+                      >♛</span>
+                      <span
+                        v-else
+                        class="captain-crown empty"
+                        :class="{ clickable: canToggleCaptain(m.team, m) }"
+                        :title="canToggleCaptain(m.team, m) ? '设为队长' : ''"
+                        @click.stop="onCrownClick(m.team, m)"
+                      >♛</span>
+                    </div>
+                    <div v-if="roomData.practice" class="no-opponent">无对手</div>
+                  </div>
+                </el-form-item>
                 <el-form-item label="观众：" v-if="roomData.watchers.length">
-                  <div>
-                    <div v-for="(item, index) in roomData.watchers" :key="index">{{ item }}</div>
+                  <div class="watcher-chips">
+                    <template v-for="(item, index) in roomData.watchers" :key="index">
+                      <el-dropdown
+                        v-if="canManageRoster"
+                        trigger="click"
+                        @command="(team: number) => promoteWatcher(item, team)"
+                      >
+                        <span class="watcher-chip clickable" title="设为玩家">{{ item }}</span>
+                        <template #dropdown>
+                          <el-dropdown-menu>
+                            <el-dropdown-item :command="0" :disabled="teamIsFull(0)">加入 A 队</el-dropdown-item>
+                            <el-dropdown-item :command="1" :disabled="roomData.practice || teamIsFull(1)">加入 B 队</el-dropdown-item>
+                          </el-dropdown-menu>
+                        </template>
+                      </el-dropdown>
+                      <span v-else class="watcher-chip">{{ item }}</span>
+                    </template>
                   </div>
                 </el-form-item>
               </el-form>
@@ -46,12 +99,12 @@
                     v-if="isWatcher"
                     type="primary"
                     @click="sitDown"
-                    :disabled="inGame || (roomData.names[0] !== '' && roomData.names[1] !== '')"
+                    :disabled="inGame || rosterLocked || !hasSeat"
                   >成为玩家</el-button
                   >
-                  <el-button v-if="isPlayer" type="primary" @click="standUp" :disabled="inGame || isReplayMode || editorStore.isEditorMode">成为观众</el-button>
+                  <el-button v-if="isPlayer" type="primary" @click="standUp" :disabled="inGame || rosterLocked || isReplayMode || editorStore.isEditorMode">成为观众</el-button>
                 </template>
-                <el-button type="primary" @click="leaveRoom" :disabled="inGame && !isWatcher">退出房间</el-button>
+                <el-button type="primary" @click="leaveRoom" :disabled="(isPlayer || isHost) && rosterLocked">退出房间</el-button>
 
                 <el-button
                   type="primary"
@@ -71,14 +124,6 @@
                   回放对局
                 </el-button>
 
-                <el-button
-                  :disabled="!inRoom || inGame || isWatcher || isReplayMode"
-                  type="primary"
-                  @click="editorStore.toggleEditorMode()"
-                  style="margin-top: 10px;"
-                >
-                  {{ editorStore.isEditorMode ? '退出编辑器' : '盘面编辑器' }}
-                </el-button>
 
               </div>
             </div>
@@ -96,27 +141,9 @@
             <template v-if="inRoom">
               <el-collapse v-model="activeCollapseNames">
                 <!-- 基本设置 -->
-                <el-collapse-item title="基本设置" name="basic" v-if="(!soloMode && isHost) || (soloMode && isPlayerA)">
+                <el-collapse-item title="基本设置" name="basic" v-if="isHost || (!roomData.host && isCaptainOfTeam(0))">
                   <el-form label-width="90px">
-                    <el-form-item label="规则：">
-                      <div class="label-with-button">
-                        <div>
-                          <el-select v-if="showTypeInput" v-model="roomSettings.type" style="width: 150px">
-                            <el-option
-                              v-for="(item, index) in gameTypeList"
-                              :key="index"
-                              :label="item.name"
-                              :value="item.type"
-                              :disabled="item.type === BingoType.BP && roomSettings.board_size !== 5"
-                            ></el-option>
-                          </el-select>
-                          <span v-else> {{ roomTypeText }}</span>
-                        </div>
-                        <el-button link type="primary" @click="editType" v-if="!inGame">{{
-                            showTypeInput ? "确认" : "修改"
-                          }}</el-button>
-                      </div>
-                    </el-form-item>
+                    <el-form-item label="规则：">{{ roomTypeText }}</el-form-item>
                     <el-form-item label="盘面大小：">
                       <el-radio-group
                         v-model="roomSettings.board_size"
@@ -240,7 +267,7 @@
                 </el-collapse-item>
 
                 <!-- 玩法设置 -->
-                <el-collapse-item title="玩法设置" name="gameplay" v-if="(!soloMode && isHost) || (soloMode && isPlayerA)">
+                <el-collapse-item title="玩法设置" name="gameplay" v-if="isHost || (!roomData.host && isCaptainOfTeam(0))">
                   <el-form label-width="90px">
                     <el-form-item label="卡池设定：">
                       <el-radio-group
@@ -309,127 +336,6 @@
                         </template>
                       </template>
                     </el-form-item>
-                    <el-form-item label="AI练习：" v-if="aiPracticeVisible">
-                      <el-checkbox
-                          v-model="roomSettings.use_ai"
-                          :disabled="aiPracticeDisabled || customCardPoolActive"
-                          @change="roomStore.updateRoomConfig()"
-                          style="margin-right: 0"
-                      ></el-checkbox>
-                    </el-form-item>
-                    <el-form-item label="AI策略：" v-if="roomSettings.use_ai && roomSettings.type !== BingoType.LINK">
-                      <el-select
-                          v-model="roomSettings.ai_strategy_level"
-                          style="width: 120px"
-                          @change="roomStore.updateRoomConfig('ai_strategy_level')"
-                          :disabled="inGame"
-                      >
-                        <el-option
-                            v-for="(item, index) in aiStrategyLevelList"
-                            :key="index"
-                            :label="item.name"
-                            :value="item.type"
-                        ></el-option>
-                      </el-select>
-                    </el-form-item>
-                    <!--
-                    <el-form-item label="AI风格：" v-if="roomSettings.use_ai && roomSettings.ai_strategy_level >= 3">
-                      <el-select
-                        v-model="roomSettings.ai_style"
-                        style="width: 120px"
-                        @change="roomStore.updateRoomConfig('ai_style')"
-                        :disabled="inGame"
-                      >
-                        <el-option
-                          v-for="(item, index) in aiStyleLevelList"
-                          :key="index"
-                          :label="item.name"
-                          :value="item.type"
-                        ></el-option>
-                      </el-select>
-                    </el-form-item>
-                    -->
-                    <el-form-item label="AI底力：" v-if="roomSettings.use_ai">
-                      <div style="display: flex; align-items: center; width: 100%;">
-                        <el-slider
-                          v-model="roomSettings.ai_base_power"
-                          :min="0"
-                          :max="10"
-                          :step="0.1"
-                          :disabled="inGame"
-                          @change="roomStore.updateRoomConfig('ai_base_power')"
-                          style="flex-grow: 1; margin-right: 15px;"
-                        />
-                        <el-input-number
-                          v-model="roomSettings.ai_base_power"
-                          :min="0"
-                          :max="10"
-                          :step="0.1"
-                          :disabled="inGame"
-                          size="small"
-                          controls-position="right"
-                          @change="roomStore.updateRoomConfig('ai_base_power')"
-                          style="width: 130px;"
-                        />
-                      </div>
-                    </el-form-item>
-                    <el-form-item label="AI熟练度：" v-if="roomSettings.use_ai">
-                      <div style="display: flex; align-items: center; width: 100%;">
-                        <el-slider
-                          v-model="roomSettings.ai_experience"
-                          :min="0"
-                          :max="10"
-                          :step="0.1"
-                          :disabled="inGame"
-                          @change="roomStore.updateRoomConfig('ai_experience')"
-                          style="flex-grow: 1; margin-right: 15px;"
-                        />
-                        <el-input-number
-                          v-model="roomSettings.ai_experience"
-                          :min="0"
-                          :max="10"
-                          :step="0.1"
-                          :disabled="inGame"
-                          size="small"
-                          controls-position="right"
-                          @change="roomStore.updateRoomConfig('ai_experience')"
-                          style="width: 130px;"
-                        />
-                      </div>
-                    </el-form-item>
-                    <el-form-item label="选卡温度：" v-if="roomSettings.use_ai && roomSettings.type !== BingoType.LINK && roomSettings.ai_strategy_level >= 3">
-                      <div style="display: flex; align-items: center; width: 100%;">
-                        <el-slider
-                          v-model="roomSettings.ai_temperature"
-                          :min="0"
-                          :max="2"
-                          :step="0.05"
-                          :disabled="inGame"
-                          @change="roomStore.updateRoomConfig('ai_temperature')"
-                          style="flex-grow: 1; margin-right: 15px;"
-                        />
-                        <el-input-number
-                          v-model="roomSettings.ai_temperature"
-                          :min="0"
-                          :max="2"
-                          :step="0.05"
-                          :disabled="inGame"
-                          size="small"
-                          controls-position="right"
-                          @change="roomStore.updateRoomConfig('ai_temperature')"
-                          style="width: 130px;"
-                        />
-                      </div>
-                    </el-form-item>
-                    <el-form-item label="AI相性：" v-if="roomSettings.use_ai">
-                      <el-button
-                          type="primary"
-                          @click="showAIPreferenceBalancer"
-                          size="small"
-                      >
-                        设置相性
-                      </el-button>
-                    </el-form-item>
                     <el-form-item label="盲盒设定：" v-if="roomSettings.type !== BingoType.LINK">
                       <el-select
                           v-model="roomSettings.blind_setting"
@@ -475,21 +381,29 @@
                         ></el-option>
                       </el-select>
                     </el-form-item>
-                    <el-form-item label="转换格数：" v-if="roomSettings.dual_board > 0 && roomSettings.type == BingoType.STANDARD">
-                      <el-input-number
-                          class="input-number"
-                          v-model="currentPortalCount"
-                          :min="1"
-                          :max="roomSettings.board_size * roomSettings.board_size"
-                          :step="1"
+                    <el-form-item label="盘面生成：" v-if="roomSettings.dual_board > 0">
+                      <el-select
+                          v-model="roomSettings.copy_board"
+                          style="width: 120px"
+                          @change="roomStore.updateRoomConfig('copy_board')"
                           :disabled="inGame"
-                          size="small"
-                          controls-position="right"
-                          @change="roomStore.updateRoomConfig('portal_count')"
-                      />
-                      <span class="input-number-text">格</span>
+                      >
+                        <el-option label="差异盘面" :value="false"></el-option>
+                        <el-option label="复制盘面" :value="true"></el-option>
+                      </el-select>
                     </el-form-item>
-                    <el-form-item label="差异等级：" v-if="roomSettings.dual_board > 0 && roomSettings.type == BingoType.STANDARD">
+                    <el-form-item label="收卡标准：" v-if="roomSettings.dual_board === 0">
+                      <el-select
+                          v-model="roomSettings.capture_standard"
+                          style="width: 120px"
+                          @change="roomStore.updateRoomConfig('capture_standard')"
+                          :disabled="inGame"
+                      >
+                        <el-option label="1 次" :value="1"></el-option>
+                        <el-option label="2 次" :value="2"></el-option>
+                      </el-select>
+                    </el-form-item>
+                    <el-form-item label="差异等级：" v-if="roomSettings.dual_board > 0 && !roomSettings.copy_board">
                       <el-input-number
                           class="input-number"
                           v-model="roomSettings.diff_level"
@@ -562,7 +476,7 @@
                 </el-collapse-item>
             
             <!-- 作品设置 -->
-            <el-collapse-item title="作品设置" name="game" v-if="(!soloMode && isHost) || (soloMode && isPlayerA)">
+            <el-collapse-item title="作品设置" name="game" v-if="isHost || (!roomData.host && isCaptainOfTeam(0))">
               <el-form label-width="90px">
                 <el-form-item label="作品BP：">
                   <el-checkbox
@@ -658,8 +572,8 @@
               </el-form>
             </el-collapse-item>
 
-            <!-- 左侧玩家设置 -->
-            <el-collapse-item title="左侧玩家设置" name="playerA" >
+            <!-- A 队设置 -->
+            <el-collapse-item title="A队设置" name="playerA" >
               <el-form label-width="90px">
                 <el-form-item label="颜色：">
                 <el-color-picker
@@ -684,7 +598,7 @@
                   />
                   <span class="input-number-text">秒</span>
                 </el-form-item>
-                <el-form-item label="换卡次数：" v-if="roomData.type === 1">
+                <el-form-item label="基础换卡：" v-if="roomData.type === 1">
                   <el-input-number
                     class="input-number"
                     v-model="roomSettings.playerA.changeCardCount"
@@ -699,8 +613,8 @@
             </el-form>
           </el-collapse-item>
 
-          <!-- 右侧玩家设置 -->
-          <el-collapse-item title="右侧玩家设置" name="playerB">
+          <!-- B 队设置 -->
+          <el-collapse-item title="B队设置" name="playerB" v-if="!roomData.practice">
             <el-form label-width="90px">
               <el-form-item label="颜色：">
                 <el-color-picker
@@ -725,7 +639,7 @@
                   />
                   <span class="input-number-text">秒</span>
                 </el-form-item>
-                <el-form-item label="换卡次数：" v-if="roomData.type === 1">
+                <el-form-item label="基础换卡：" v-if="roomData.type === 1">
                   <el-input-number
                     class="input-number"
                     v-model="roomSettings.playerB.changeCardCount"
@@ -859,14 +773,6 @@
         @confirm="handleWeightConfirm"
     />
 
-    <!-- AI偏好设置对话框 -->
-    <AIPreferenceBalancer
-        v-model:visible="aiPreferenceVisible"
-        :game-list="activeGameList"
-        :current-preferences="roomSettings.ai_preference"
-        @confirm="handleAIPreferenceConfirm"
-    />
-
     <CustomLevelBalancer
       v-model:visible="customLevelBalancerVisible"
       :current-counts="currentCustomLevelCount"
@@ -962,6 +868,9 @@ import {
   ElCollapse,
   ElCollapseItem,
   ElAlert,
+  ElDropdown,
+  ElDropdownMenu,
+  ElDropdownItem,
 } from "element-plus";
 import Config from "@/config";
 import { useRoomStore } from "@/store/RoomStore";
@@ -970,7 +879,6 @@ import { useGameStore } from "@/store/GameStore";
 import { BingoType } from "@/types";
 import Replay from "@/utils/Replay";
 import GameWeightBalancer from '../../../components/GameWeightBalancer.vue'
-import AIPreferenceBalancer from '../../../components/AIPreferenceBalancer.vue'
 import CustomLevelBalancer from '../../../components/CustomLevelBalancer.vue'
 import Documentation from '@/components/Documentation.vue';
 import { QuestionFilled } from '@element-plus/icons-vue'
@@ -989,7 +897,6 @@ const customCardPoolStore = useCustomCardPoolStore();
 
 const scrollbar = ref<InstanceType<typeof ElScrollbar>>();
 const weightBalancerVisible = ref(false);
-const aiPreferenceVisible = ref(false);
 const customLevelBalancerVisible = ref(false);
 const customCardPoolDialogVisible = ref(false);
 const onlinePoolDialogVisible = ref(false);
@@ -1178,6 +1085,50 @@ const isHost = computed(() => roomStore.isHost);
 const isWatcher = computed(() => roomStore.isWatcher);
 const soloMode = computed(() => roomStore.soloMode);
 const inGame = computed(() => roomStore.inGame);
+const rosterLocked = computed(() => roomStore.rosterLocked);
+const teamMembers = (team: number) => roomStore.teamMembers(team);
+const rosterMembers = computed(() =>
+  roomStore.orderedMembers.filter((m) => !roomData.value.practice || m.team === 0)
+);
+const isCaptainOfTeam = (team: number) =>
+  teamMembers(team).some((m) => m.captain && m.name === localStore.username);
+const hasSeat = computed(() => {
+  if (roomData.value.practice) return teamMembers(0).length < 4;
+  return teamMembers(0).length < 4 || teamMembers(1).length < 4;
+});
+
+const canMoveMember = (team: number, m: any) => {
+  if (rosterLocked.value) return false;
+  if (roomData.value.practice) return false;
+  if (isHost.value) return true;
+  return m.name === localStore.username;
+};
+const onColorBarClick = (m: { team: number; name: string }) => {
+  if (!canMoveMember(m.team, m)) return;
+  roomStore.switchTeam(1 - m.team, isHost.value ? m.name : undefined);
+};
+const canToggleCaptain = (team: number, m: any) => {
+  if (rosterLocked.value) return false;
+  if (isHost.value) return true;
+  return m.name === localStore.username;
+};
+const onCrownClick = (team: number, m: any) => {
+  if (!canToggleCaptain(team, m)) return;
+  roomStore.toggleCaptain(isHost.value ? m.name : undefined);
+};
+// 导播房导播 / 无导播房 A 队队长可调整玩家与观众身份
+const canManageRoster = computed(
+  () => !rosterLocked.value && (isHost.value || (!roomData.value.host && isCaptainOfTeam(0)))
+);
+const teamIsFull = (team: number) => teamMembers(team).length >= 4;
+const demoteMember = (m: { name: string }) => {
+  if (!canManageRoster.value) return;
+  roomStore.standUp(m.name);
+};
+const promoteWatcher = (name: string, team: number) => {
+  if (!canManageRoster.value) return;
+  roomStore.sitDown(name, team);
+};
 const inMatch = computed(() => roomStore.inMatch);
 
 const roomTypeText = computed(() => {
@@ -1274,36 +1225,7 @@ const copyPassword = () => {
     });
 };
 
-const editType = () => {
-  if (showTypeInput.value === false) {
-    showTypeInput.value = true;
-  } else {
-    if (roomSettings.value.type === BingoType.LINK) {
-      roomSettings.value.dual_board = 0;
-      roomSettings.value.blind_setting = 1;
-    }
-    if (roomSettings.value.type === BingoType.BP) {
-      roomSettings.value.board_size = 5;
-      roomSettings.value.use_ai = false;
-    }
-    if (
-      roomSettings.value.type === BingoType.STANDARD
-      && roomSettings.value.board_size !== 5
-      && roomSettings.value.use_ai
-    ) {
-      roomSettings.value.use_ai = false;
-    }
-    if (roomStore.roomConfig.type !== roomSettings.value.type) {
-      roomStore.updateRoomConfig("type").then(() => {
-        showTypeInput.value = false;
-      });
-      roomStore.updateRoomConfig("game_time");
-      roomStore.updateRoomConfig("countdown");
-    } else {
-      showTypeInput.value = false;
-    }
-  }
-};
+
 const saveRoomSettings = () => {
   roomStore.saveRoomSettings();
 };
@@ -1448,19 +1370,7 @@ const handleWeightConfirm = (weights: Record<string, number>) => {
   roomStore.updateRoomConfig('game_weight')
 }
 
-const showAIPreferenceBalancer = () => {
-  aiPreferenceVisible.value = true
-}
-const handleAIPreferenceConfirm = (preferences: Record<string, number>) => {
-  // 更新roomSettings中的ai_preference
-  roomSettings.value.ai_preference = preferences
-  // 保存到服务器
-  roomStore.updateRoomConfig('ai_preference')
-}
 
-const showCustomLevelBalancer = () => {
-  customLevelBalancerVisible.value = true;
-};
 
 const handleCustomLevelConfirm = (counts: number[]) => {
   currentCustomLevelCount.value = counts;
@@ -1606,6 +1516,138 @@ const activeCollapseNames = ref(['basic', 'gameplay', 'game', 'playerA', 'player
 }
 .room-info {
   text-align: left;
+}
+
+// 队伍成员：单列混排，A 队在前、B 队在后，用左侧色条区分
+.team-member-list {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.team-member-card {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding-right: 8px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.03);
+  font-size: 13px;
+}
+
+// 只有色条是换队热区
+.team-color-bar {
+  flex: 0 0 10px;
+  width: 10px;
+  align-self: stretch;
+  border-radius: 3px 0 0 3px;
+
+  &.clickable {
+    cursor: pointer;
+
+    &:hover {
+      filter: brightness(0.8);
+    }
+  }
+}
+
+.team-a .team-color-bar {
+  background: var(--A-color, #409eff);
+}
+
+.team-b .team-color-bar {
+  background: var(--B-color, #f56c6c);
+}
+
+.member-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.me-tag {
+  flex: 0 0 auto;
+  padding: 0 4px;
+  height: 16px;
+  line-height: 16px;
+  border-radius: 8px;
+  background: #e6f4ff;
+  color: #1677ff;
+  font-size: 11px;
+}
+
+.identity-btn {
+  flex: 0 0 auto;
+  padding: 0 4px;
+  height: 16px;
+  line-height: 16px;
+  border-radius: 8px;
+  background: #f0f2f5;
+  color: #909399;
+  font-size: 11px;
+  cursor: pointer;
+
+  &:hover {
+    background: #e6f4ff;
+    color: #1677ff;
+  }
+}
+
+.captain-crown {
+  flex: 0 0 auto;
+  color: #e6a23c;
+  font-size: 14px;
+  line-height: 1;
+
+  &.empty {
+    color: #c0c4cc;
+    opacity: 0;
+  }
+
+  &.clickable {
+    cursor: pointer;
+  }
+}
+
+.team-member-card:hover .captain-crown.empty {
+  opacity: 0.55;
+}
+
+.no-opponent {
+  padding: 2px 0 2px 10px;
+  color: #909399;
+  font-size: 12px;
+}
+
+.watcher-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.watcher-chip {
+  padding: 0 6px;
+  height: 20px;
+  line-height: 20px;
+  border-radius: 10px;
+  background: #f0f2f5;
+  color: #606266;
+  font-size: 12px;
+
+  &.clickable {
+    cursor: pointer;
+
+    &:hover {
+      background: #e6f4ff;
+      color: #1677ff;
+    }
+  }
 }
 
 .room-info-none {

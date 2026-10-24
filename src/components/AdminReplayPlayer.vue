@@ -75,7 +75,10 @@
                   :name="spell?.name || ''"
                   :desc="spell?.desc || ''"
                   :level="spellLevel(spell)"
-                  :status="simulation.spellStatus[index] ?? SpellStatus.NONE"
+                  :status="isStandardReplay ? undefined : simulation.spellStatus[index] ?? SpellStatus.NONE"
+                  :cell="isStandardReplay ? currentCell(index) : null"
+                  :other-cell="isStandardReplay && isDualBoard ? otherCell(index) : null"
+                  :is-dual-board="isStandardReplay && isDualBoard"
                   :disabled="true"
                   :selected="false"
                   :spell-index="index"
@@ -83,13 +86,6 @@
                   :is-portal-b="isPortalB(index)"
                   :is-a-current-board="viewBoard === 0"
                   :is-b-current-board="viewBoard === 1"
-                  :preview-current-board="viewBoard"
-                  :preview-dual-board="logData.roomConfig.dual_board || 0"
-                  :preview-player-a-board="simulation.playerBoards[0]"
-                  :preview-player-b-board="simulation.playerBoards[1]"
-                  :preview-get-on-which-board="logData.normalData?.get_on_which_board || []"
-                  :preview-viewer-is-player-a="false"
-                  :preview-viewer-is-player-b="false"
                   :link-marker="linkMarker(index)"
                   :link-status-a="simulation.linkData?.status_a?.[index] || 0"
                   :link-status-b="simulation.linkData?.status_b?.[index] || 0"
@@ -183,7 +179,7 @@
 <script lang="ts" setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { BingoType, GameStatus, SpellStatus } from "@/types";
-import type { LinkData, Spell } from "@/types";
+import type { CellSnapshot, CellView, LinkData, Spell } from "@/types";
 import { ElButton, ElEmpty, ElOption, ElSelect, ElSlider, ElTag } from "element-plus";
 import Replay, { type GameLogData, type PlayerAction } from "@/utils/Replay";
 import SpellCardCell from "@/components/spell-card-cell.vue";
@@ -205,6 +201,8 @@ const palette = ref(readPaletteSettings());
 
 const simulation = reactive({
   spellStatus: [] as number[],
+  cells: [] as CellView[],
+  cells2: [] as CellView[],
   playerBoards: [0, 0] as [number, number],
   gameStatus: GameStatus.NOT_STARTED,
   currentAction: null as PlayerAction | null,
@@ -220,6 +218,13 @@ const logData = computed(() => {
 });
 
 const playerNames = computed<[string, string]>(() => {
+  const teams = logData.value?.standard_data?.teams;
+  if (teams && teams.length >= 2) {
+    return [
+      teams[0]?.captain || teams[0]?.members?.[0]?.name || logData.value?.players?.[0] || "",
+      teams[1]?.captain || teams[1]?.members?.[0]?.name || logData.value?.players?.[1] || "",
+    ];
+  }
   const players = logData.value?.players || [];
   return [players[0] || "", players[1] || ""];
 });
@@ -238,6 +243,7 @@ const replayActions = computed(() =>
 const actionCount = computed(() => replayActions.value.length);
 const isDualBoard = computed(() => (logData.value?.roomConfig.dual_board || 0) > 0 && !!logData.value?.spells2?.length);
 const isLinkReplay = computed(() => logData.value?.roomConfig.type === BingoType.LINK);
+const isStandardReplay = computed(() => !!logData.value?.standard_data);
 const replayBoardSize = computed(() => logData.value?.roomConfig.board_size || 5);
 const extraLineColor = computed(() => palette.value.extraLineColor || "#fbff00");
 const spellCardSizePercent = computed(() => {
@@ -260,7 +266,7 @@ const displayedSpells = computed(() => {
 });
 
 const extraLinesForDisplay = computed(() => {
-  const lines = logData.value?.normalData?.extra_lines || [];
+  const lines = logData.value?.standard_data?.extra_lines || logData.value?.normalData?.extra_lines || [];
   const bs = replayBoardSize.value;
   return lines.map((line) => {
     const points = line
@@ -420,8 +426,37 @@ const cloneLinkData = (data: LinkData | null | undefined): LinkData | null => {
   };
 };
 
+const snapshotToView = (cell: CellSnapshot | null | undefined, index: number): CellView | null => {
+  if (!cell) return null;
+  return {
+    index,
+    selected_by_a: [...(cell.selected_by_a || [])],
+    selected_by_b: [...(cell.selected_by_b || [])],
+    capture_count_a: cell.capture_count_a ?? null,
+    capture_count_b: cell.capture_count_b ?? null,
+    captured_by_a: !!cell.captured_by_a,
+    captured_by_b: !!cell.captured_by_b,
+    fully_captured_by: cell.fully_captured_by ?? null,
+    my_selected: false,
+    content_reveal: 4,
+  };
+};
+
+const currentCell = (index: number) =>
+  (viewBoard.value === 1 ? simulation.cells2 : simulation.cells)[index] || null;
+const otherCell = (index: number) =>
+  (viewBoard.value === 1 ? simulation.cells : simulation.cells2)[index] || null;
+
 const resetSimulation = () => {
   simulation.spellStatus = [...(logData.value?.initStatus || [])];
+  const standard = logData.value?.standard_data;
+  if (standard) {
+    simulation.cells = (standard.cells || []).map((cell, index) => snapshotToView(cell, index) as CellView);
+    simulation.cells2 = (standard.cells2 || []).map((cell, index) => snapshotToView(cell, index) as CellView);
+  } else {
+    simulation.cells = [];
+    simulation.cells2 = [];
+  }
   simulation.playerBoards = getInitialPlayerBoards();
   simulation.gameStatus = actionCount.value ? GameStatus.STARTED : GameStatus.NOT_STARTED;
   simulation.currentAction = null;
@@ -436,6 +471,18 @@ const boardLabel = (boardIndex: number) => (boardIndex === 1 ? "B" : "A");
 
 const getActionTypeLabel = (actionType: string) => {
   if (actionType === "select") return "选择符卡";
+  if (actionType === "cancel") return "取消选卡";
+  if (actionType === "capture_partial") return "收取一次";
+  if (actionType === "capture_complete") return "完成收取";
+  if (actionType === "grab_victim") return "被抢卡";
+  if (actionType === "grab_public") return "抢卡";
+  if (actionType === "director_select") return "导播选卡";
+  if (actionType === "director_cancel") return "导播取消选卡";
+  if (actionType === "director_capture") return "导播收取一次";
+  if (actionType === "director_set") return "导播设为收取";
+  if (actionType === "director_clear") return "导播置空";
+  if (actionType === "change") return "使用换卡";
+  if (actionType === "refund") return "换卡返还";
   if (actionType === "finish") return "收取符卡";
   if (actionType === "contest_win") return "抢卡成功";
   if (actionType === "pause") return "暂停比赛";
@@ -578,6 +625,32 @@ const applyAction = (action: PlayerAction) => {
   const actionType = action.actionType.split("-")[0];
   const spellIndex = action.spellIndex;
   const playerIndex = getPlayerIndex(action);
+
+  if (isStandardReplay.value) {
+    const op = action.op || actionType;
+    simulation.gameStatus = op === "pause" ? GameStatus.PAUSED : GameStatus.STARTED;
+    if (Array.isArray(action.scoreNow) && action.scoreNow.length === 2) {
+      simulation.currentScore = [action.scoreNow[0] || 0, action.scoreNow[1] || 0];
+    }
+    if (action.cell_after && spellIndex >= 0) {
+      const board = action.board ?? 0;
+      const view = snapshotToView(action.cell_after, spellIndex);
+      const list = board === 1 ? [...simulation.cells2] : [...simulation.cells];
+      if (view) list[spellIndex] = view;
+      if (board === 1) simulation.cells2 = list;
+      else simulation.cells = list;
+      if (action.cell_after_other) {
+        const otherView = snapshotToView(action.cell_after_other, spellIndex);
+        const otherBoard = 1 - board;
+        const otherList = otherBoard === 1 ? [...simulation.cells2] : [...simulation.cells];
+        if (otherView) otherList[spellIndex] = otherView;
+        if (otherBoard === 1) simulation.cells2 = otherList;
+        else simulation.cells = otherList;
+      }
+    }
+    simulation.currentAction = action;
+    return;
+  }
 
   if (isLinkReplay.value && action.linkData) {
     simulation.linkData = cloneLinkData(action.linkData);

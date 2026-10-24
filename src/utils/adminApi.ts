@@ -37,7 +37,7 @@ const resolveAdminApiBase = () => {
     return parsedUrl.toString().replace(/\/$/, "");
   }
 
-  return `${window.location.protocol}//${window.location.hostname}:9999/admin-api`;
+  return `${window.location.protocol}//${window.location.hostname}:9998/admin-api`;
 };
 
 const ADMIN_API_BASE = resolveAdminApiBase();

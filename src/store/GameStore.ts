@@ -1,7 +1,7 @@
 import { defineStore } from "pinia";
 import { computed, nextTick, reactive, ref, watch } from "vue";
 import { useRoomStore } from "./RoomStore";
-import { BingoType, GameData, GameStatus, OneSpell, RoomConfig, Spell, SpellStatus, EditorPreset, LinkData } from "@/types";
+import { BingoType, CellView, GameData, GameStatus, OneSpell, RoomConfig, Spell, SpellStatus, EditorPreset, LinkData } from "@/types";
 import { BoardSpec } from "@/utils/board";
 import ws from "@/utils/webSocket/WebSocketBingo";
 import { WebSocketActionType, WebSocketPushActionType } from "@/utils/webSocket/types";
@@ -24,7 +24,20 @@ export const useGameStore = defineStore("game", () => {
 
   //bingo对局相关
   const spells = ref<Spell[]>([]);
+  /** 旧状态，仅回放/编辑器使用；实时标准赛只读 cells */
   const spellStatus = ref<SpellStatus[]>([]);
+  const cells = ref<CellView[]>([]);
+  const cells2 = ref<CellView[]>([]);
+  const mySelectedIndex = ref(-1);
+  const mySelectedBoard = ref(0);
+  const myTeam = ref<number | null>(null);
+  const isCaptain = ref(false);
+  const captureStandard = ref(1);
+  const changeCardCount = ref<number[]>([0, 0]);
+  const changePending = ref(false);
+  const changeOriginIndex = ref(-1);
+  const changeOriginBoard = ref(-1);
+  const extraLines = ref<number[][]>([]);
   const leftTime = ref(0);
   const countDownTime = ref(0);
   const gameStatus = ref(GameStatus.NOT_STARTED);
@@ -43,20 +56,15 @@ export const useGameStore = defineStore("game", () => {
   let pendingSpellStatusTimers: number[] = [];
   watch(spellCardGrabbedFlag, (val) => {
     if (val) {
-      leftCdTime.value = 0;
       nextTick(() => {
         spellCardGrabbedFlag.value = false;
       });
     }
   });
 
-  const bothSelectedIndex = computed(() => spellStatus.value.indexOf(SpellStatus.BOTH_SELECTED));
-  const playerASelectedIndex = computed(() =>
-    bothSelectedIndex.value === -1 ? spellStatus.value.indexOf(SpellStatus.A_SELECTED) : bothSelectedIndex.value
-  );
-  const playerBSelectedIndex = computed(() =>
-    bothSelectedIndex.value === -1 ? spellStatus.value.indexOf(SpellStatus.B_SELECTED) : bothSelectedIndex.value
-  );
+  // 兼容旧调用点：按“自己所在队伍”返回自己的选卡
+  const playerASelectedIndex = computed(() => (myTeam.value === 0 ? mySelectedIndex.value : -1));
+  const playerBSelectedIndex = computed(() => (myTeam.value === 1 ? mySelectedIndex.value : -1));
 
   const createBlankLinkData = (): LinkData => ({
     link_idx_a: [],
@@ -119,32 +127,55 @@ export const useGameStore = defineStore("game", () => {
     }
   };
 
+  let gameDataLoading = false;
+  let gameDataRetry = false;
   const getGameData = () => {
+    // 还没进入房间时不要发请求；等 roomId 就绪后由 watch/推送触发
+    if (!roomStore.roomId) return Promise.resolve();
+    // 开局/重连时 push_start_game 与 push_roster_update 可能同时触发，避免重复请求
+    if (gameDataLoading) {
+      gameDataRetry = true;
+      return Promise.resolve();
+    }
+    gameDataLoading = true;
+    gameDataRetry = false;
     const requestRoomId = roomStore.roomId;
     return ws
       .send(WebSocketActionType.GET_ALL_SPELLS)
       .then((data: GameData) => {
-        if (requestRoomId !== roomStore.roomId) return;
+        // 请求期间切换了房间：丢弃旧数据，结束后按新 roomId 重新拉取
+        if (requestRoomId !== roomStore.roomId) {
+          gameDataRetry = true;
+          return;
+        }
         if (data.room_config) roomStore.applyRoomConfig(data.room_config, true);
         spells.value = data.spells;
         spells2.value = data.spells2 || [];
-        spellStatus.value = data.spell_status;
+        cells.value = data.cells || [];
+        cells2.value = data.cells2 || [];
+        mySelectedIndex.value = data.my_selected_index ?? -1;
+        mySelectedBoard.value = data.my_selected_board ?? 0;
+        myTeam.value = data.my_team ?? null;
+        isCaptain.value = !!data.is_captain;
+        captureStandard.value = data.capture_standard ?? 1;
+        changeCardCount.value = data.change_card_count || [0, 0];
+        changePending.value = !!data.my_change_pending;
+        changeOriginIndex.value = data.my_change_origin_index ?? -1;
+        changeOriginBoard.value = data.my_change_origin_board ?? -1;
+        extraLines.value = data.extra_lines || [];
         leftTime.value = data.left_time;
         gameStatus.value = data.status;
         leftCdTime.value = data.left_cd_time;
         inited.value = true;
-        for (const i in data.bp_data) {
-          bpGameData[i] = data.bp_data[i];
-        }
-        if (data.normal_data) {
-          for (const i in data.normal_data) {
-            normalGameData[i] = data.normal_data[i];
-          }
-        }
-        applyLinkData(data.link_data as Partial<LinkData> | null, true);
-        linkLogSnapshot = cloneLinkData(linkGameData);
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => {
+        gameDataLoading = false;
+        if (gameDataRetry && roomStore.roomId) {
+          gameDataRetry = false;
+          void getGameData();
+        }
+      });
   };
   const clearPendingSpellStatusTimers = () => {
     pendingSpellStatusTimers.forEach((timer) => window.clearTimeout(timer));
@@ -169,10 +200,30 @@ export const useGameStore = defineStore("game", () => {
     }
   );
 
+  // 加入房间时 roomId 可能先于 started 更新；变更后补拉一次（观战加入中局的关键路径）
+  watch(
+    () => roomStore.roomId,
+    (id) => {
+      if (id && roomStore.roomData.started && !isReplayMode.value) getGameData();
+    }
+  );
+
   const resetGameData = () => {
     clearPendingSpellStatusTimers();
     spells.value = [];
     spellStatus.value = [];
+    cells.value = [];
+    cells2.value = [];
+    mySelectedIndex.value = -1;
+    mySelectedBoard.value = 0;
+    myTeam.value = null;
+    isCaptain.value = false;
+    captureStandard.value = 1;
+    changeCardCount.value = [0, 0];
+    changePending.value = false;
+    changeOriginIndex.value = -1;
+    changeOriginBoard.value = -1;
+    extraLines.value = [];
     leftTime.value = 0;
     countDownTime.value = 0;
     gameStatus.value = GameStatus.NOT_STARTED;
@@ -255,298 +306,183 @@ export const useGameStore = defineStore("game", () => {
     return ws.send(WebSocketActionType.SET_DEBUG_SPELLS, { spells: debugSpellList.value });
   };
 
-  const selectSpell = (index: number) => {
-    return ws.send(WebSocketActionType.SELECT_SPELL, { index });
+  const selectSpell = (index: number, board = currentBoard.value) => {
+    return ws.send(WebSocketActionType.SELECT_SPELL, { index, board });
   };
 
-  const finishSpell = (index: number, success = true, playerIndex?: 0 | 1) => {
-    return ws.send(WebSocketActionType.FINISH_SPELL, { index, success, player_index: playerIndex });
+  const finishSpell = (index: number) => {
+    return ws.send(WebSocketActionType.FINISH_SPELL, { index, success: true });
+  };
+
+  const changeCard = () => {
+    return ws.send(WebSocketActionType.CHANGE_CARD);
+  };
+
+  const updateCellState = (index: number, op: string, extra: any = {}) => {
+    return ws.send(WebSocketActionType.UPDATE_CELL_STATE, {
+      index,
+      op,
+      board: extra.board ?? currentBoard.value,
+      ...extra,
+    });
   };
 
   const refreshSpell = (index: number) => {
     return ws.send(WebSocketActionType.REFRESH_SPELL, { board_idx: currentBoard.value, spell_idx: index })
   };
-  ws.on<OneSpell>(WebSocketPushActionType.PUSH_UPDATE_ONE_SPELL, (data) => {
-    const log: GameLog = {
-      index: data!.spell_idx,
-      status: 0x100,
-      oldStatus: 0,
-      causer: data!.player_name,
-    };
-    gameLogs.push(getSepllCardLog(log))
-    if(data!.board_idx == 0){
-      const newSpells = [...spells.value]; // 1. Create a shallow copy of the current array
-      newSpells[data!.spell_idx] = data!.spell; // 2. Update the element in the new array
-      spells.value = newSpells; // 3. Assign the new array back to the ref
-    }else if(data!.board_idx == 1){
+  const boardSpec = () => new BoardSpec(roomStore.roomConfig.board_size || 5);
+  const cellText = (index: number) => {
+    const board = boardSpec();
+    return `${board.row(index) + 1}行${board.col(index) + 1}列`;
+  };
+  const teamColor = (team: number | null | undefined) =>
+    team === 0 ? "var(--A-color)" : team === 1 ? "var(--B-color)" : "";
+  const actorHtml = (name: string, team: number | null | undefined, host?: string) => {
+    const label = name || host || "导播";
+    // 导播本身不着队伍色；只有目标成员/队伍需要队伍色
+    const color = host && label === host ? "" : teamColor(team);
+    return `<span style="padding:0 2px;color:${color}">${label}</span>`;
+  };
+  const memberHtml = (name: string | null | undefined, team: number | null | undefined) =>
+    `<span style="padding:0 2px;color:${teamColor(team)}">${name || ""}</span>`;
+  const teamHtml = (team: number | null | undefined) =>
+    `<span style="padding:0 2px;color:${teamColor(team)}">${team === 0 ? "A队" : "B队"}</span>`;
+  const spellCardHtml = (index: number, board: number) => {
+    const list = board === 1 ? spells2.value : spells.value;
+    const spell = list[index];
+    const name = spell?.name || `#${index + 1}`;
+    // 只有双盘才用背景色区分两面；单盘不加背景
+    const dual = (roomStore.roomConfig.dual_board || 0) > 0;
+    const background = dual
+      ? `background-color:${board === 1 ? "var(--bg-color-reverse)" : "var(--bg-color)"};`
+      : "";
+    return `<span style="padding:0 2px;font-weight:600;${background}">${name}</span>`;
+  };
+  const victimsHtml = (victims: string[] = []) =>
+    victims
+      .map((name) => `<span style="padding:0 2px">${name}</span>`)
+      .join("、");
+
+  const formatActionLog = (data: any): string => {
+    const op = data?.op;
+    const board = data?.board ?? 0;
+    const index = data?.index ?? -1;
+    const pos = index >= 0 ? cellText(index) : "";
+    const card = index >= 0 ? spellCardHtml(index, board) : "";
+    // 导播操作时 actor_team 为 -1（无色）；无导播房为实际操作者队伍
+    const actorTeam = data?.actor_team ?? data?.team;
+    const actor = actorHtml(data?.actor || "", actorTeam, roomStore.roomData.host);
+    switch (op) {
+      case "select":
+        return `${actor}选择了${pos}的符卡${card}`;
+      case "cancel":
+        return `${actor}取消了${pos}的选择`;
+      case "capture_partial": {
+        // 双盘每面只收 1 次，服务端 capture_standard 固定为 1，进度恒为 1/1，展示无意义
+        const standard = data?.capture_standard ?? 1;
+        const dual = (roomStore.roomConfig.dual_board || 0) > 0;
+        const progress = !dual && standard > 1 ? `（${data?.capture_count}/${standard}）` : "";
+        return `${actor}收取了${pos}的符卡${card}${progress}`;
+      }
+      case "capture_complete":
+        return `${actor}收取了${pos}的符卡${card}`;
+      case "grab_victim":
+        return `${actorHtml(data?.by || data?.actor || "", actorTeam, roomStore.roomData.host)}抢了你选的符卡${card}`;
+      case "grab_public":
+        return `${actor}抢了${victimsHtml(data?.victims)}选的符卡${card}`;
+      case "change":
+        return `${actor}使用换卡，${data?.team === 0 ? "A队" : "B队"}剩余 ${data?.change_card_count} 次`;
+      case "refund":
+        return `${actor}换卡未生效，返还 1 次`;
+      case "director_select":
+        return `${actor}将${memberHtml(data?.name, data?.team)}设为选择${pos}的符卡${card}`;
+      case "director_cancel":
+        return `${actor}取消了${memberHtml(data?.name, data?.team)}在${pos}的选择`;
+      case "director_capture":
+        return `${actor}使${teamHtml(data?.team)}收取了${pos}的符卡${card}`;
+      case "director_set":
+        return `${actor}将${pos}设为${teamHtml(data?.team)}收取`;
+      case "director_clear":
+        return `${actor}将${pos}置空`;
+      case "pause":
+        return `${actor}暂停了比赛`;
+      case "resume":
+        return `${actor}继续了比赛`;
+      default:
+        return "";
+    }
+  };
+
+  // 断线重连：服务端会重推阵容快照；若对局进行中，顺带重拉完整对局状态
+  ws.on(WebSocketPushActionType.PUSH_ROSTER_UPDATE, (data: any) => {
+    if (data?.started && !isReplayMode.value) getGameData();
+  });
+
+  ws.on(WebSocketPushActionType.PUSH_UPDATE_ONE_SPELL, (data) => {
+    if (data!.board_idx == 0) {
+      const newSpells = [...spells.value];
+      newSpells[data!.spell_idx] = data!.spell;
+      spells.value = newSpells;
+    } else {
       const newSpells2 = [...spells2.value];
       newSpells2[data!.spell_idx] = data!.spell;
       spells2.value = newSpells2;
     }
-  })
-
-  const updateSpellStatus = (index, status) => {
-    return ws.send(WebSocketActionType.UPDATE_SPELL_STATUS, { index, status });
-  };
-  ws.on<{
-    index: number;
-    status: number;
-    causer: string;
-    spell_failed_count_a?: number;
-    spell_failed_count_b?: number;
-    which_board_a?: number;
-    which_board_b?: number;
-    get_on_which_board?: number;
-  }>(WebSocketPushActionType.PUSH_UPDATE_SEPLL_STATUS, (data) => {
-    const log: GameLog = {
-      index: data!.index,
-      status: data!.status,
-      oldStatus: spellStatus.value[data!.index],
-      causer: data!.causer,
-    };
-    if (data!.spell_failed_count_a) {
-      log.failCountA = data!.spell_failed_count_a;
-      nextTick(() => {
-        bpGameData.spell_failed_count_a[data!.index] = data!.spell_failed_count_a!;
-      });
-    }
-    if (data!.spell_failed_count_b) {
-      log.failCountB = data!.spell_failed_count_b;
-      nextTick(() => {
-        bpGameData.spell_failed_count_b[data!.index] = data!.spell_failed_count_b!;
-      });
-    }
-    if(data!.which_board_a != null){
-      normalGameData.which_board_a = data!.which_board_a!;
-    }
-    if(data!.which_board_b != null){
-      normalGameData.which_board_b = data!.which_board_b!;
-    }
-    if(data!.get_on_which_board){
-      log.getOnWhichBoard = data!.get_on_which_board;
-      normalGameData.get_on_which_board[data!.index] = data!.get_on_which_board!;
-    }
-    const logText = getSepllCardLog(log);
-    gameLogs.push(logText);
-
-    if (roomStore.isHost) {
-      if (data!.causer === roomStore.roomData.names[0]) {
-        scheduleSpellStatusUpdate(data!.index, data!.status, roomStore.roomSettings.playerA.delay * 1000);
-      } else if (data!.causer === roomStore.roomData.names[1]) {
-        scheduleSpellStatusUpdate(data!.index, data!.status, roomStore.roomSettings.playerB.delay * 1000);
-      } else {
-        spellStatus.value[data!.index] = data!.status;
-      }
-    } else {
-      spellStatus.value[data!.index] = data!.status;
-    }
+    gameLogs.push(
+      `${actorHtml(roomStore.roomData.host || "", null)}刷新了${cellText(data!.spell_idx)}的符卡${spellCardHtml(data!.spell_idx, data!.board_idx)}`
+    );
   });
 
-  const getSepllCardLog = ({
-                             index,
-                             status,
-                             oldStatus,
-                             causer,
-                             failCountA,
-                             failCountB,
-                           }: {
-    index: number;
-    status: number;
-    oldStatus: number;
-    causer: string;
-    failCountA?: number;
-    failCountB?: number;
-  }) => {
-    let str = "";
-    const playerA = `<span style="padding:0 2px;color:var(--A-color)">${roomStore.roomData.names[0]}</span>`;
-    const playerB = `<span style="padding:0 2px;color:var(--B-color)">${roomStore.roomData.names[1]}</span>`;
-    const host = `<span style="padding:0 2px;font-weight:600">${roomStore.roomData.host}</span>`;
+  const myCaptureFlag = ref(false);
+  ws.on<{ board: number; cell: CellView }>(WebSocketPushActionType.PUSH_CELL_UPDATE, (data) => {
+    if (!data) return;
+    const list = data.board === 1 ? cells2.value : cells.value;
+    const next = [...list];
+    next[data.cell.index] = data.cell;
+    if (data.board === 1) cells2.value = next;
+    else cells.value = next;
+  });
 
-    let side = 0;
-    //操作是谁发出的？
-    const fromPlayerA = roomStore.roomData.names[0] === causer;
-    const fromPlayerB = roomStore.roomData.names[1] === causer;
-    const fromHost = roomStore.roomData.host === causer;
-    //目前前端是谁？
-    const isPA = roomStore.isPlayerA;
-    const isPB = roomStore.isPlayerB;
+  ws.on<{ index: number; board: number }>(WebSocketPushActionType.PUSH_MY_SELECTION, (data) => {
+    mySelectedIndex.value = data?.index ?? -1;
+    mySelectedBoard.value = data?.board ?? 0;
+    if (mySelectedIndex.value === -1) alreadySelectCard.value = false;
+  });
 
-    //考虑状态转换带来的事件
-    //注意事件需要符合发起者身份，不符合则认为是直接设置
-    //选卡两种情况
-    const actASelect = ((oldStatus === 0 && status === 1) || (oldStatus === 3 && status === 2)) && fromPlayerA;
-    const actBSelect = ((oldStatus === 0 && status === 3) || (oldStatus === 1 && status === 2)) && fromPlayerB;
-    //收卡只需要判断最终状态
-    const actAGet = status === 5 && fromPlayerA;
-    const actBGet = status === 7 && fromPlayerB;
-    //被抢卡只有自己可见
-    const actALost = (oldStatus === 1 || oldStatus === 2) && status === 7 && isPA && fromPlayerB;
-    const actBLost = (oldStatus === 3 || oldStatus === 2) && status === 5 && isPB && fromPlayerA;
-    //否则，为状态设置
-    const isPlayerSet = !(actASelect || actBSelect || actAGet || actBGet || actALost || actBLost);
+  ws.on<{ index: number; board: number; left_cd_time: number }>(WebSocketPushActionType.PUSH_MY_CAPTURE, (data) => {
+    leftCdTime.value = data?.left_cd_time ?? 0;
+    alreadySelectCard.value = false;
+    myCaptureFlag.value = true;
+    nextTick(() => (myCaptureFlag.value = false));
+  });
 
-    if (actALost || actBLost) {
-      spellCardGrabbedFlag.value = true;
+  ws.on(WebSocketPushActionType.PUSH_GRAB_ALERT, () => {
+    spellCardGrabbedFlag.value = true;
+  });
+
+  ws.on<{ team: number; count: number; reason: string }>(
+    WebSocketPushActionType.PUSH_UPDATE_CHANGE_CARD_COUNT,
+    (data) => {
+      if (data?.team !== 0 && data?.team !== 1) return;
+      const next = [...changeCardCount.value];
+      next[data.team] = data.count;
+      changeCardCount.value = next;
     }
+  );
 
-    if(isPlayerSet || fromHost){
-      if((oldStatus === 1 || oldStatus === 2) && status === 7 && isPA){
-        spellCardGrabbedFlag.value = true;
-      }else if((oldStatus === 3 || oldStatus === 2) && status === 5 && isPB){
-        spellCardGrabbedFlag.value = true;
-      }
+  ws.on<{ pending: boolean; origin_index: number; origin_board: number }>(
+    WebSocketPushActionType.PUSH_CHANGE_STATE,
+    (data) => {
+      changePending.value = !!data?.pending;
+      changeOriginIndex.value = data?.origin_index ?? -1;
+      changeOriginBoard.value = data?.origin_board ?? -1;
     }
+  );
 
-    // 选卡CD只由"自己收卡"触发：服务端只在收卡者身上更新 lastGetTime
-    // 不能依赖选卡按钮重新挂载来推断CD，否则取消选卡（按钮同样会重新挂载）也会错误进入倒计时
-    if((isPA && actAGet) || (isPB && actBGet)){
-      leftCdTime.value = isPA ? roomStore.actualCdTimeA : roomStore.actualCdTimeB;
-    }
-
-      //如果是收卡行为，检查在哪一面收卡
-      //导播直接覆盖
-      if (fromHost && (actAGet || actBGet)) {
-        const get = normalGameData.get_on_which_board[index];
-        if ((get === 0x2 || get === 0x20)) {
-          side = 1;
-        }
-      } else if (!fromHost) {
-        //选手考虑2种状态：my-select -> my-get,  my/both-select -> op-get
-        //B被抢卡
-        if (actBLost) {
-          side = normalGameData.which_board_b;
-          //A被抢卡
-        } else if (actALost) {
-          side = normalGameData.which_board_a;
-          //收卡用收取记录判定
-        } else if (actAGet || actBGet) {
-          const get = normalGameData.get_on_which_board[index];
-          if ((get === 0x2 || get === 0x20)) {
-            side = 1;
-          }
-        }
-      }
-
-      //如果是选卡行为，直接返回对应选手所在面
-      if (actASelect) {
-        side = normalGameData.which_board_a;
-      } else if (actBSelect) {
-        side = normalGameData.which_board_b;
-      }
-
-      //如果是设置行为，先定位设置的是谁，再返回其所在面
-      if (isPlayerSet) {
-        if (status === 1) {
-          side = normalGameData.which_board_a;
-        } else if (status === 3) {
-          side = normalGameData.which_board_b;
-        } else if (status === 5 || status === 7) {
-          //设置收取同导播
-          const get = normalGameData.get_on_which_board[index];
-          if ((get === 0x2 || get === 0x20)) {
-            side = 1;
-          }
-        } else if (status === 2) {
-          if (oldStatus === 1) {
-            side = normalGameData.which_board_b;
-          } else if (oldStatus === 3) {
-            side = normalGameData.which_board_a;
-          }
-          //其余情况不分人，只需要找到发起者
-        } else {
-          if (fromPlayerA) {
-            side = normalGameData.which_board_a;
-          } else if (fromPlayerB) {
-            side = normalGameData.which_board_b;
-          }
-        }
-      }
-
-      //roomSettings对非房主无效？所以用Spell2判定
-    const isDual = spells2.value.length > 0;
-    const curSpellList = computed(() => (side === 1 && isDual ? spells2.value : spells.value) )
-    const spellCard = isDual ?
-      `<span style="padding:0 2px;font-weight:600;background-color: var(--${side === 0 ? 'bg-color':'bg-color-reverse'})">
-      ${curSpellList.value[index].name}</span>`
-    :
-        `<span style="padding:0 2px;font-weight:600;">${curSpellList.value[index].name}</span>`
-    ;
-
-    const board = new BoardSpec(roomStore.roomConfig.board_size || 5);
-    const row = board.row(index)+1;
-    const col = board.col(index)+1;
-
-    if(!fromHost){
-      if(fromPlayerA){
-        str += playerA;
-      }else if(fromPlayerB){
-        str += playerB;
-      }
-
-      if(isPlayerSet){
-        str += `将${row}行${col}列的${spellCard}`;
-        switch(status){
-          case -1: str += `禁用`; break;
-          case 0: str += `置空`; break;
-          case 1: str += `设为左侧选择`; break;
-          case 2: str += `设为双方选择`; break;
-          case 3: str += `设为右侧选择`; break;
-          case 5: str += `设为左侧收取`; break;
-          case 6: str += `设为双方收取`; break;
-          case 7: str += `设为右侧收取`; break;
-        }
-      }else if(actALost || actBLost){
-        str += `抢了你选的符卡${spellCard}`
-      }else if(actAGet || actBGet){
-        str += `收取了${row}行${col}列的符卡${spellCard}`;
-      }else if(actASelect || actBSelect){
-        str += `选择了${row}行${col}列的符卡${spellCard}`;
-      }
-    }else{
-      if (roomStore.roomData.type === BingoType.BP) {
-        const currentCountA = bpGameData.spell_failed_count_a[index];
-        const currentCountB = bpGameData.spell_failed_count_b[index];
-        if (failCountA! > currentCountA) {
-          return `${playerA}收取符卡${spellCard}失败`;
-        }
-        if (failCountB! > currentCountB) {
-          return `${playerB}收取符卡${spellCard}失败`;
-        }
-      }
-      str = `${host}把符卡${spellCard}`;
-      switch (status) {
-        case -1:
-          str += "设置为禁用";
-          break;
-        case 0:
-          str += "状态置空";
-          break;
-        case 1:
-          str += `设置为${playerA}选择`;
-          break;
-        case 2:
-          str += "设置为双方选择";
-          break;
-        case 3:
-          str += `设置为${playerB}选择`;
-          break;
-        case 5:
-          str += `设置为${playerA}收取`;
-          break;
-        case 6:
-          str += "设置为双方收取";
-          break;
-        case 7:
-          str += `设置为${playerB}收取`;
-          break;
-        case 0x100:
-          str += `刷新，该符卡位于${board.row(index)+1}行${board.col(index)+1}列`
-          break;
-      }
-    }
-
-    return str;
-  };
+  ws.on(WebSocketPushActionType.PUSH_ACTION_LOG, (data) => {
+    const text = formatActionLog(data);
+    if (text) gameLogs.push(text);
+  });
 
   //bp赛
   const bpGameData = reactive({
@@ -668,32 +604,6 @@ export const useGameStore = defineStore("game", () => {
     linkLogSnapshot = newData;
   });
 
-  watch(
-    () => normalGameData.which_board_a,
-    (newVal, oldVal) => {
-      if (roomStore.isPlayerA){
-        currentBoard.value = newVal;
-      }
-    },
-    {
-      immediate: true,
-      deep: true,
-    }
-  );
-
-  watch(
-    () => normalGameData.which_board_b,
-    (boardB) => {
-      if (roomStore.isPlayerB){
-        currentBoard.value = boardB;
-      }
-    },
-    {
-      immediate: true,
-      deep: true,
-    }
-  );
-
   const setReplayMode = (isReplay: boolean) => {
       isReplayMode.value = isReplay;
   }
@@ -720,6 +630,19 @@ export const useGameStore = defineStore("game", () => {
   return {
     spells,
     spellStatus,
+    cells,
+    cells2,
+    mySelectedIndex,
+    mySelectedBoard,
+    myTeam,
+    isCaptain,
+    captureStandard,
+    changeCardCount,
+    changePending,
+    changeOriginIndex,
+    changeOriginBoard,
+    extraLines,
+    myCaptureFlag,
     leftTime,
     countDownTime,
     gameStatus,
@@ -744,7 +667,8 @@ export const useGameStore = defineStore("game", () => {
     setDebugSeplls,
     selectSpell,
     finishSpell,
-    updateSpellStatus,
+    changeCard,
+    updateCellState,
     bpGameBanPick,
     bpGameNextRound,
     linkRoute,
